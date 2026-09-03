@@ -1,0 +1,10 @@
+node_modules
+dist
+build
+.next
+out
+coverage
+.venv
+__pycache__
+package-lock.json
+*.md

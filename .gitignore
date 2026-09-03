@@ -1,0 +1,42 @@
+# --- Environment ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Node / JS / TS ---
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.turbo/
+.eslintcache
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- Logs ---
+*.log
+npm-debug.log*
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# --- Docker ---
+docker-compose.override.yml
+
+# --- Misc local data ---
+*.local
