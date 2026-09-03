@@ -1,8 +1,9 @@
 # Architecture
 
-Status: **M1 — Foundation**. This document describes the structure established in M1 and the
-design intent for pieces that don't exist as code yet (marked explicitly). See
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the milestone sequence.
+Status: **M2 — Authentication**, building on the M1 foundation. This document describes the
+structure established so far and the design intent for pieces that don't exist as code yet
+(marked explicitly). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the milestone
+sequence.
 
 ## 1. Monorepo layout
 
@@ -38,8 +39,9 @@ Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4. Scaffolded with t
 `create-next-app` CLI and left structurally as generated (App Router, `src/` layout,
 `@/*` import alias) — no custom framework wiring was introduced.
 
-M1 contains only the default route (`/`) with a plain status page. No auth, dashboard, or
-product UI exists.
+Routes as of M2: `/` (status page), `/login`, `/register` (client-side forms calling the API
+directly), `/dashboard` (server-rendered, authenticated placeholder — see §9). No real product
+UI (calling, booking, billing, etc.) exists.
 
 ## 3. apps/api — Backend API
 
@@ -47,24 +49,32 @@ Express 5 + TypeScript, ESM (`"type": "module"`). Modular layout:
 
 ```
 src/
-  config/       env parsing (config/env.ts), logger (config/logger.ts)
-  routes/       URL -> controller wiring only, no logic
-  controllers/  HTTP request/response handling only, no business logic
-  services/     business logic, framework-agnostic (importable/testable without Express)
-  app.ts        Express app factory (used directly by tests, no network binding)
-  server.ts     process entrypoint — the only file that calls `app.listen`
+  config/         env parsing (config/env.ts), logger (config/logger.ts)
+  db/             Drizzle schema, migrations, pg client (see §9)
+  auth/           password hashing, session token generation/validation, cookie helpers
+  repositories/   UserRepository/SessionRepository interfaces + Postgres (Drizzle) implementations
+  services/       business logic, framework-agnostic (auth.service.ts, health.service.ts)
+  middleware/     requireAuth — the actual server-side auth boundary (see SECURITY.md)
+  validation/     zod request-body schemas
+  routes/         URL -> controller wiring only, no logic
+  controllers/    HTTP request/response handling only, no business logic
+  app.ts          Express app factory (accepts injected deps for tests — see §9)
+  server.ts       process entrypoint — the only file that calls `app.listen`
 ```
 
 This split exists so business logic (`services/`) never imports Express types, and so tests can
 exercise the full middleware stack via `createApp()` without opening a real port (see
-`apps/api/tests/health.test.ts`, using Supertest against the app instance).
+`apps/api/tests/`, using Supertest against the app instance).
 
 Cross-cutting middleware applied in `app.ts`: `helmet` (security headers), `cors` (restricted to
-`WEB_ORIGIN`), `pino-http` (structured request logging, with `authorization`/`cookie` headers
-redacted — see [SECURITY.md](SECURITY.md)).
+`WEB_ORIGIN`, `credentials: true` so the session cookie is sent on cross-port requests from
+`apps/web`), `pino-http` (structured request logging, with `authorization`/`cookie` headers
+redacted — see [SECURITY.md](SECURITY.md)), and a centralized JSON error handler (never leaks
+stack traces to clients).
 
-M1 exposes exactly one route: `GET /health`. No auth middleware, no data routes, no tenant
-context — those arrive with M2/M3.
+Routes as of M2: `GET /health` (M1, unauthenticated) and `POST /auth/register`,
+`POST /auth/login`, `POST /auth/logout`, `GET /auth/me` (M2 — see §9). No tenant-scoped data
+routes yet — those arrive with M3.
 
 ## 4. packages/shared
 
@@ -111,10 +121,11 @@ or copied into this repository.
 
 ## 6. Multi-tenancy
 
-**No tenant-scoped data exists yet in M1** (no database, no organizations, no users, no calls).
-This section documents the boundary and enforcement strategy that M3 onward must implement,
-written now so every later milestone builds against the same model instead of improvising one
-under deadline pressure.
+**No tenant-scoped data exists yet** (no organizations, no calls/leads/appointments). M2 added a
+`users` table (§9), but it is not yet organization-scoped — that's M3's job. This section
+documents the boundary and enforcement strategy that M3 onward must implement, written now so
+every later milestone builds against the same model instead of improvising one under deadline
+pressure.
 
 ### Tenant boundary
 
@@ -122,7 +133,7 @@ The tenant is the **organization** (a business account, e.g. one dental office o
 company). Every one of the following record types is organization-scoped and must carry an
 `organization_id`:
 
-* users (a user belongs to exactly one organization in M1's model — no cross-org membership)
+* users (a user belongs to exactly one organization in this model — no cross-org membership)
 * business configuration
 * calls, call transcripts, call summaries
 * leads
@@ -146,9 +157,10 @@ Frontend filtering is **not** a security boundary — the plan below never relie
 1. **Every org-scoped table gets an `organization_id` column** (foreign key to
    `organizations.id`), indexed, and non-nullable.
 2. **Tenant context is derived server-side from the authenticated session only** — the backend
-   resolves `organization_id` from the verified session/JWT after auth (M2), never from a
-   client-supplied body/query/header field. A request that names a different `organization_id`
-   than the caller's own session is rejected, not honored.
+   resolves `organization_id` from the verified session (§9's `requireAuth` middleware already
+   establishes the authenticated-user pattern this extends), never from a client-supplied
+   body/query/header field. A request that names a different `organization_id` than the caller's
+   own session is rejected, not honored.
 3. **A data-access layer enforces scoping, not ad-hoc query authors.** All org-scoped reads/writes
    go through a repository/query layer that requires a tenant context argument to compile/run —
    there is no "raw query with tenant filtering optional" escape hatch in application code.
@@ -165,12 +177,19 @@ See [SECURITY.md](SECURITY.md) for how this fits the broader security posture.
 
 ## 7. Data layer
 
-PostgreSQL and Redis are **not connected to by any service in M1** — no schema, no migrations,
-no client wiring in `apps/api` or `services/voice-agent`. `infrastructure/docker/docker-compose.yml`
-provisions both for local development ahead of M3, using current stable images
-(`postgres:17.11-alpine`, `redis:8.10-alpine`). This was validated for YAML correctness only;
-Docker itself is not installed in this environment, so the containers have not been started — see
-[DEPLOYMENT.md](DEPLOYMENT.md) for the exact verification that was and wasn't possible.
+**PostgreSQL**: as of M2, `apps/api` has a real schema (`users`, `sessions` — see §9) via Drizzle
+ORM, with generated SQL migrations in `apps/api/src/db/migrations/`. `services/voice-agent` still
+does not connect to it. **The schema and migrations have not been applied to or tested against a
+real Postgres instance** — Docker is unavailable in this environment (same limitation as M1; see
+[DEPLOYMENT.md](DEPLOYMENT.md)). Application-level auth logic was instead verified against
+in-memory repository test doubles implementing the same interfaces (§9) — this exercises the real
+business logic but not Postgres itself.
+
+**Redis**: still not connected to by any service.
+
+`infrastructure/docker/docker-compose.yml` provisions both for local development, using current
+stable images (`postgres:17.11-alpine`, `redis:8.10-alpine`), validated for YAML correctness only
+— see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## 8. Environment variables
 
@@ -180,3 +199,62 @@ service reads only the variables relevant to it (see `apps/api/src/config/env.ts
 `services/voice-agent/src/voice_agent/config.py`). Variables for integrations not yet built
 (Stripe, Twilio, Deepgram, etc.) are present as empty placeholders so the eventual config surface
 is documented ahead of time — see [SECURITY.md](SECURITY.md) for handling rules.
+
+As of M2, `AUTH_SECRET` is the first variable that's actually required: `apps/api` calls
+`assertAuthSecret()` at startup (`server.ts`, before `app.listen`) and refuses to start without
+it, rather than silently hashing passwords with an insecure default.
+
+## 9. Authentication
+
+Full endpoint/response/test detail lives in [TASKS.md](TASKS.md) and [SECURITY.md](SECURITY.md);
+this section covers the design.
+
+**Session model — server-authoritative, cookie-based, opaque tokens (not JWT).** A high-entropy
+random token is generated per session; only its SHA-256 hash is ever persisted
+(`apps/api/src/auth/session.ts`), so a database read alone can't yield a valid session. The raw
+token goes to the browser in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` when
+`NODE_ENV=production`) — never to client-side JavaScript, never in `localStorage`. This is the
+pattern documented at Lucia Auth's ["Sessions" guide](https://lucia-auth.com/sessions/basic);
+Lucia the *library* was discontinued by its maintainer, so this repository implements the pattern
+directly (`apps/api/src/auth/session.ts`, `cookies.ts`) rather than depending on an unmaintained
+package.
+
+**Password hashing — Argon2id** via the `argon2` package (OWASP's current first-choice
+algorithm, ahead of bcrypt/scrypt), using its default work factor. Passwords are additionally
+HMAC'd with `AUTH_SECRET` before hashing (`apps/api/src/auth/password.ts`) — a documented
+defense-in-depth "pepper" technique (OWASP Password Storage Cheat Sheet), not custom
+cryptography. A database-only leak is insufficient to crack passwords offline.
+
+**Persistence — Drizzle ORM + `pg`, Postgres only** (`apps/api/src/db/`). Chosen over Prisma for
+being TypeScript-native, lightweight (no codegen binary/engine), and SQL-transparent — fits the
+"avoid unnecessary dependencies" principle established in M1. `drizzle-kit generate` produces
+real SQL migration files without needing a live database connection; *applying* them requires
+Postgres, which is unavailable in this environment (§7).
+
+**Repository interfaces as the DI seam** (`apps/api/src/repositories/types.ts`): `UserRepository`
+and `SessionRepository` are interfaces with a Postgres/Drizzle implementation for production
+(`repositories/drizzle/`) and an in-memory implementation used only by tests
+(`apps/api/tests/support/in-memory-repositories.ts`). `createApp()` accepts an optional injected
+`authService`, defaulting to the real Postgres-backed one — tests inject the in-memory version
+instead, exercising the full HTTP layer, controllers, and business logic without a live database.
+This is a test-strategy seam, not a production code path.
+
+**Endpoints** (`apps/api/src/routes/auth.routes.ts`, mounted at `/auth`):
+
+| Method & path | Auth required | Notes |
+|---|---|---|
+| `POST /auth/register` | no | 201 + sets session cookie (auto-login). 409 on duplicate email. |
+| `POST /auth/login` | no | 200 + sets session cookie. 401 with a generic message for any failure. |
+| `POST /auth/logout` | no (idempotent) | Invalidates the session server-side if one exists; always clears the cookie. |
+| `GET /auth/me` | yes | Behind `requireAuth` middleware — the actual enforcement point. |
+
+**Backend security boundary**: `apps/api/src/middleware/require-auth.ts` is what protects
+`GET /auth/me` (and every future protected endpoint) — it independently validates the session
+token server-side on every request. `apps/web`'s `/dashboard` page performs its own check
+(`apps/web/src/lib/session.ts` calls the API's `/auth/me`, forwarding the incoming request's
+cookie, and redirects to `/login` on failure) purely for UX; that frontend check is never the
+security boundary. See [SECURITY.md](SECURITY.md).
+
+**M3 extension point**: `users.id` is a stable UUID primary key. M3 is expected to add an
+`organization_members` join table (or an `organization_id` column) referencing it — this
+authentication system does not need to be replaced or redesigned for that.

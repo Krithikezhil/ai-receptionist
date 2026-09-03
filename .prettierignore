@@ -8,3 +8,6 @@ coverage
 __pycache__
 package-lock.json
 *.md
+
+# drizzle-kit generated migration metadata — tool output, not hand-authored
+apps/api/src/db/migrations/meta

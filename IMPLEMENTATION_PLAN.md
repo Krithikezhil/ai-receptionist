@@ -14,10 +14,11 @@ README/ARCHITECTURE/SECURITY/DEPLOYMENT/TASKS). No product features. See
 
 ## M2 — Authentication
 
-Real user authentication for `apps/web` + `apps/api` (sign up, sign in, session/JWT handling,
-password reset). Establishes the identity layer that M3's tenant-scoping depends on ("tenant
-context comes from the authenticated session" per ARCHITECTURE.md §6 requires this to exist
-first).
+Real user authentication for `apps/web` + `apps/api`: registration, login, logout, server-side
+cookie-based sessions (see ARCHITECTURE.md §9 for why sessions over JWT). Establishes the
+identity layer that M3's tenant-scoping depends on ("tenant context comes from the authenticated
+session" per ARCHITECTURE.md §6 requires this to exist first). Password reset, email
+verification, and MFA are deferred — see SECURITY.md known gaps.
 
 ## M3 — Organizations and business configuration
 

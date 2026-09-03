@@ -1,8 +1,8 @@
 # Deployment
 
-Status: **M1 — Foundation. Nothing in this repository is deployed anywhere.** Production
+Status: **M2 — Authentication. Nothing in this repository is deployed anywhere.** Production
 deployment is milestone **M13** in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This
-document currently covers local development only, plus the Docker limitation for this
+document currently covers local development only, plus the Docker/Postgres limitation for this
 environment.
 
 ## Local development
@@ -20,7 +20,9 @@ environment.
 
 ```bash
 npm install                          # installs web + api + shared, builds shared automatically
-cp .env.example .env                 # fill in values as needed; safe to leave placeholders empty for M1
+cp .env.example .env
+# Set AUTH_SECRET — apps/api refuses to start without it:
+#   openssl rand -base64 32
 ```
 
 The voice-agent is a separate Python project and is not part of the npm workspace:
@@ -42,28 +44,38 @@ cd services/voice-agent
 uv run voice-agent         # -> http://localhost:8000  (GET /health)
 ```
 
-### Data layer (optional, requires Docker)
+### Data layer (requires Docker)
 
 ```bash
 docker compose -f infrastructure/docker/docker-compose.yml up -d
+cd apps/api && npx drizzle-kit migrate   # applies src/db/migrations/ to Postgres
 ```
 
-No service currently connects to Postgres/Redis (see ARCHITECTURE.md §7), so this is not
-required to run or test anything in M1.
+As of M2, `apps/api`'s `/auth/register` and `/auth/login` **require** a real Postgres connection
+(`DATABASE_URL`) to actually persist users/sessions — `GET /health` does not. Redis is still
+unused by any service.
 
 ## Docker limitation in this environment
 
-**Docker is not installed on the machine this M1 implementation was built and verified on.**
-`docker`/`docker compose` were confirmed unavailable in both the bash and PowerShell shells
-during initial repository inspection. As a result:
+**Docker is not installed on the machine this was built and verified on.** `docker`/`docker
+compose` were confirmed unavailable in both the bash and PowerShell shells during initial
+repository inspection, and remained unavailable through M2. As a result:
 
 * `infrastructure/docker/docker-compose.yml` was validated by parsing it as YAML (confirms it's
   syntactically well-formed and declares the expected `postgres`/`redis` services) — **not** by
   running `docker compose config` or actually starting containers.
+* The Drizzle migration in `apps/api/src/db/migrations/` was generated (`drizzle-kit generate`,
+  which only reads the TypeScript schema — no DB connection needed) but **has not been applied to
+  or tested against a real Postgres instance**.
+* Auth registration/login/session logic was instead verified against in-memory repository test
+  doubles implementing the same interfaces the real Postgres repositories implement — see
+  [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication) and [TASKS.md](TASKS.md). This proves the
+  business logic works; it does not prove the SQL migration or Postgres-specific behavior does.
 * No claim is made anywhere in this repository that Postgres or Redis were run, connected to, or
-  tested in M1.
-* Before relying on the compose file, run `docker compose -f infrastructure/docker/docker-compose.yml config`
-  on a machine with Docker installed as a first sanity check.
+  tested against real data.
+* Before relying on this, on a machine with Docker installed: run `docker compose -f
+  infrastructure/docker/docker-compose.yml up -d`, then `cd apps/api && npx drizzle-kit migrate`,
+  then exercise `/auth/register` and `/auth/login` for real.
 
 ## Production deployment
 

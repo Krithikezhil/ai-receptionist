@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center bg-zinc-50 px-6 font-sans dark:bg-black">
@@ -6,7 +8,8 @@ export default function Home() {
           AI Receptionist
         </h1>
         <p className="text-lg text-zinc-600 dark:text-zinc-400">
-          Foundation build (M1). Product features are not implemented yet.
+          Foundation build (M2: authentication). Calling, AI conversations, leads, appointments, and
+          billing are not implemented yet.
         </p>
         <p className="text-sm text-zinc-500 dark:text-zinc-500">
           See{" "}
@@ -15,6 +18,14 @@ export default function Home() {
           </code>{" "}
           in the repository root for current scope and milestones.
         </p>
+        <div className="flex gap-4 text-sm font-medium">
+          <Link href="/login" className="underline">
+            Log in
+          </Link>
+          <Link href="/register" className="underline">
+            Register
+          </Link>
+        </div>
       </main>
     </div>
   );
