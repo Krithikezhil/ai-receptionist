@@ -39,9 +39,10 @@ Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4. Scaffolded with t
 `create-next-app` CLI and left structurally as generated (App Router, `src/` layout,
 `@/*` import alias) — no custom framework wiring was introduced.
 
-Routes as of M2: `/` (status page), `/login`, `/register` (client-side forms calling the API
-directly), `/dashboard` (server-rendered, authenticated placeholder — see §9). No real product
-UI (calling, booking, billing, etc.) exists.
+Routes as of M3: `/` (status page), `/login`, `/register` (client-side forms calling the API
+directly), `/dashboard` (server-rendered; shows an organization-creation form if the user has
+none, otherwise a real business-profile/hours/services configuration UI — see §10). No real
+product UI (calling, booking, billing, etc.) exists.
 
 ## 3. apps/api — Backend API
 
@@ -50,11 +51,13 @@ Express 5 + TypeScript, ESM (`"type": "module"`). Modular layout:
 ```
 src/
   config/         env parsing (config/env.ts), logger (config/logger.ts)
-  db/             Drizzle schema, migrations, pg client (see §9)
+  db/             Drizzle schema, migrations, pg client (see §9, §10)
   auth/           password hashing, session token generation/validation, cookie helpers
-  repositories/   UserRepository/SessionRepository interfaces + Postgres (Drizzle) implementations
-  services/       business logic, framework-agnostic (auth.service.ts, health.service.ts)
-  middleware/     requireAuth — the actual server-side auth boundary (see SECURITY.md)
+  repositories/   repository interfaces + Postgres (Drizzle) implementations, unit-of-work (§10)
+  services/       business logic, framework-agnostic (auth, organization, business-profile,
+                   business-hours, services-catalog, health)
+  middleware/     requireAuth, requireOrgMembership — the actual server-side boundaries
+                   (see SECURITY.md)
   validation/     zod request-body schemas
   routes/         URL -> controller wiring only, no logic
   controllers/    HTTP request/response handling only, no business logic
@@ -72,9 +75,12 @@ Cross-cutting middleware applied in `app.ts`: `helmet` (security headers), `cors
 redacted — see [SECURITY.md](SECURITY.md)), and a centralized JSON error handler (never leaks
 stack traces to clients).
 
-Routes as of M2: `GET /health` (M1, unauthenticated) and `POST /auth/register`,
-`POST /auth/login`, `POST /auth/logout`, `GET /auth/me` (M2 — see §9). No tenant-scoped data
-routes yet — those arrive with M3.
+Routes as of M3: `GET /health` (M1, unauthenticated); `POST /auth/register`, `POST /auth/login`,
+`POST /auth/logout`, `GET /auth/me` (M2 — see §9); `POST /organizations`, `GET /organizations`,
+`GET|PATCH /organizations/:organizationId`, `GET|PUT /organizations/:organizationId/business-profile`,
+`GET|PUT /organizations/:organizationId/business-hours`,
+`GET|POST /organizations/:organizationId/services`,
+`PATCH|DELETE /organizations/:organizationId/services/:serviceId` (M3 — see §10).
 
 ## 4. packages/shared
 
@@ -121,11 +127,9 @@ or copied into this repository.
 
 ## 6. Multi-tenancy
 
-**No tenant-scoped data exists yet** (no organizations, no calls/leads/appointments). M2 added a
-`users` table (§9), but it is not yet organization-scoped — that's M3's job. This section
-documents the boundary and enforcement strategy that M3 onward must implement, written now so
-every later milestone builds against the same model instead of improvising one under deadline
-pressure.
+**Implemented as of M3** for organizations, business profiles, business hours, and services (see
+§10). Calls, leads, appointments, knowledge, phone numbers, billing, and integrations remain
+future record types that will follow the same pattern established here.
 
 ### Tenant boundary
 
@@ -133,16 +137,17 @@ The tenant is the **organization** (a business account, e.g. one dental office o
 company). Every one of the following record types is organization-scoped and must carry an
 `organization_id`:
 
-* users (a user belongs to exactly one organization in this model — no cross-org membership)
-* business configuration
-* calls, call transcripts, call summaries
-* leads
-* appointments
-* knowledge base entries
-* phone numbers
-* integrations (Google Calendar, Twilio config, etc.)
-* usage records
-* billing/subscription records
+* users — via `organization_memberships` (a join table, not a direct column on `users`; a user
+  can in principle belong to multiple organizations, though the M3 frontend only surfaces one)
+* business configuration — `business_profiles`, `business_hours`, `services` (M3, §10)
+* calls, call transcripts, call summaries — future
+* leads — future
+* appointments — future
+* knowledge base entries — future
+* phone numbers — future
+* integrations (Google Calendar, Twilio config, etc.) — future
+* usage records — future
+* billing/subscription records — future
 
 There is no scenario in this product where one organization should ever see another
 organization's rows. Unlike some SaaS designs, there is no "shared across tenants" data class
@@ -150,40 +155,62 @@ planned beyond global, non-tenant config (e.g. system feature flags), so the def
 for any new table is "it needs `organization_id`" unless a reviewer explicitly justifies
 otherwise.
 
-### Enforcement strategy (to implement starting M3)
+### Enforcement strategy
 
-Frontend filtering is **not** a security boundary — the plan below never relies on it.
+Frontend filtering is **not** a security boundary — nothing below relies on it.
 
-1. **Every org-scoped table gets an `organization_id` column** (foreign key to
-   `organizations.id`), indexed, and non-nullable.
-2. **Tenant context is derived server-side from the authenticated session only** — the backend
-   resolves `organization_id` from the verified session (§9's `requireAuth` middleware already
-   establishes the authenticated-user pattern this extends), never from a client-supplied
-   body/query/header field. A request that names a different `organization_id` than the caller's
-   own session is rejected, not honored.
-3. **A data-access layer enforces scoping, not ad-hoc query authors.** All org-scoped reads/writes
-   go through a repository/query layer that requires a tenant context argument to compile/run —
-   there is no "raw query with tenant filtering optional" escape hatch in application code.
-4. **PostgreSQL Row-Level Security (RLS) as defense-in-depth.** Once real tables exist, each
-   org-scoped table gets an RLS policy keyed off a per-request/connection session variable (e.g.
-   `SET LOCAL app.organization_id = '<uuid>'`), so that even a bug in the application-layer
-   scoping (point 3) cannot leak cross-tenant rows — the database itself refuses to return them.
-5. **Fail closed.** Missing or invalid tenant context must result in zero rows / a rejected
-   request, never an unscoped query that returns everything.
-6. **Tenant isolation is part of the test suite** once real data models exist — every
-   org-scoped endpoint needs a test asserting org A cannot read/write org B's data.
+1. **Every org-scoped table has a non-nullable, indexed `organization_id` foreign key** to
+   `organizations.id`, `ON DELETE CASCADE`. Implemented for `business_profiles`, `business_hours`,
+   `services` (§10's migration).
+2. **The organization named in a request is never trusted merely because it's present — it is
+   independently re-authorized on every single request.** `organization_id` does appear in the
+   URL (`/organizations/:organizationId/...`), which is normal, unremarkable REST design — the
+   security property isn't about *where* the id comes from, it's that `requireOrgMembership`
+   (`apps/api/src/middleware/require-org-membership.ts`) runs a fresh database query
+   (`(organizationId, req.user.id) -> membership row?`) on every request, after `requireAuth` has
+   independently verified the session. A non-member gets 404 regardless of what they name in the
+   URL — proven by automated tests that create org A as user A, then have user B (authenticated,
+   but not a member of org A) attempt to read/write it by naming org A's real id directly (see
+   `apps/api/tests/organizations.test.ts`). This is a deliberate refinement of the original M1
+   wording of this section ("never from a client-supplied field") — the precise property that
+   matters is *independent re-authorization on every request*, which a URL param satisfies just
+   as well as a session-cached value would, and arguably better (see point 5).
+3. **A data-access layer enforces scoping, not ad-hoc query authors.** Every repository method
+   that reads/writes a service by id also filters by `organizationId` in the same query (e.g.
+   `ServiceRepository.update(id, organizationId, changes)` — see §10) — there is no "raw query
+   with tenant filtering optional" escape hatch in application code. A spoofed `organizationId` in
+   a request *body* is additionally a no-op: create/update schemas don't accept that field at all,
+   so the URL-derived, already-authorized value is the only one ever used.
+4. **PostgreSQL Row-Level Security (RLS) — not implemented yet.** Documented in M1/M2 as a
+   defense-in-depth layer under the application-layer scoping; still not built as of M3. The
+   application-layer scoping (points 2-3) is the only enforcement currently in place. Tracked as a
+   known limitation — see SECURITY.md.
+5. **Fail closed.** A non-member gets 404 (not 403) — the same response whether the organization
+   exists and they're not a member, or it doesn't exist at all — so the endpoint can't be used to
+   enumerate which organization ids exist. No query path returns cross-tenant rows on
+   missing/invalid context.
+6. **Tenant isolation is directly tested.** `apps/api/tests/organizations.test.ts` proves, with
+   real HTTP requests through the full middleware stack (not mocked): an unauthenticated caller is
+   rejected; a member can access their org; a non-member cannot access, read, or write another
+   org's organization record, business profile, or services; a spoofed body-level
+   `organizationId` cannot orphan a record into another tenant; duplicate memberships are
+   rejected; organization creation produces exactly one correct owner membership.
 
 See [SECURITY.md](SECURITY.md) for how this fits the broader security posture.
 
 ## 7. Data layer
 
-**PostgreSQL**: as of M2, `apps/api` has a real schema (`users`, `sessions` — see §9) via Drizzle
-ORM, with generated SQL migrations in `apps/api/src/db/migrations/`. `services/voice-agent` still
-does not connect to it. **The schema and migrations have not been applied to or tested against a
-real Postgres instance** — Docker is unavailable in this environment (same limitation as M1; see
-[DEPLOYMENT.md](DEPLOYMENT.md)). Application-level auth logic was instead verified against
-in-memory repository test doubles implementing the same interfaces (§9) — this exercises the real
-business logic but not Postgres itself.
+**PostgreSQL**: `apps/api` has a real schema — `users`, `sessions` (M2, §9); `organizations`,
+`organization_memberships`, `business_profiles`, `business_hours`, `services` (M3, §10) — via
+Drizzle ORM, with generated SQL migrations in `apps/api/src/db/migrations/`
+(`0000_clever_shiver_man.sql`, `0001_curly_forge.sql`). `services/voice-agent` still does not
+connect to it. **Neither migration has been applied to or tested against a real Postgres
+instance** — Docker is unavailable in this environment (same limitation as M1; see
+[DEPLOYMENT.md](DEPLOYMENT.md)). Application-level logic was instead verified against in-memory
+repository test doubles implementing the same interfaces (§9, §10) — this exercises the real
+business logic and HTTP layer but not Postgres itself, and specifically **not** the real unique
+constraints, foreign keys, or transaction rollback behavior (the in-memory unit-of-work does not
+actually roll back partial writes on failure — see SECURITY.md known limitations).
 
 **Redis**: still not connected to by any service.
 
@@ -255,6 +282,67 @@ token server-side on every request. `apps/web`'s `/dashboard` page performs its 
 cookie, and redirects to `/login` on failure) purely for UX; that frontend check is never the
 security boundary. See [SECURITY.md](SECURITY.md).
 
-**M3 extension point**: `users.id` is a stable UUID primary key. M3 is expected to add an
-`organization_members` join table (or an `organization_id` column) referencing it — this
-authentication system does not need to be replaced or redesigned for that.
+**M3 extension point**: `users.id` is a stable UUID primary key. M3 added an
+`organization_memberships` join table referencing it (§10) without any change to the
+authentication system itself — exactly the extension this section anticipated.
+
+## 10. Organizations
+
+Full endpoint list, test coverage, and known limitations live in
+[TASKS.md](TASKS.md)/[SECURITY.md](SECURITY.md); this section covers the design.
+
+**Schema** (`apps/api/src/db/schema.ts`, migration `0001_curly_forge.sql`):
+
+* `organizations` — `id`, `name`, `slug` (unique), timestamps.
+* `organization_memberships` — `organization_id` + `user_id` (both FK, `ON DELETE CASCADE`),
+  `role` (`"owner" | "member"` — no fine-grained RBAC yet, matching the M3 brief), unique on
+  `(organization_id, user_id)` so a user can't be added to the same org twice.
+* `business_profiles` — one per organization (`organization_id` itself is `unique`, not just
+  indexed): name, description, phone, email, website, address, timezone.
+* `business_hours` — one row per `(organization_id, day_of_week)` (0=Sunday..6=Saturday,
+  matching JS `Date#getDay()`), unique on that pair; `open_time`/`close_time` are nullable
+  `"HH:MM"` strings, null when closed. No holiday/special-hours calendar (explicitly out of M3
+  scope).
+* `services` — a minimal catalog (name, duration, price, active flag) describing what a business
+  offers. No booking/scheduling/availability logic — that's a later milestone.
+
+**Role model**: any membership (owner or member) currently grants full read/write access to that
+organization's profile/hours/services. The brief explicitly excludes building RBAC beyond
+"authenticated or not" for M3, so no endpoint currently distinguishes owner from member — this is
+a deliberate scope decision, not an oversight, and the `role` column exists specifically so a
+future milestone can add that distinction without a schema change.
+
+**Current organization**: M3 does **not** store a "current organization" anywhere — not in the
+session, not in a cookie. Every organization-scoped request names the organization explicitly via
+the URL (`/organizations/:organizationId/...`), and `requireOrgMembership` independently
+re-verifies membership against the database on every single request (see §6 point 2 for why this
+is at least as strong a guarantee as a session-cached value, and arguably stronger — membership
+changes take effect immediately rather than waiting for a new session). The `apps/web` dashboard
+calls `GET /organizations`, and — since M3 doesn't build a multi-organization switcher UI — simply
+uses the first result. A user with multiple memberships (fully supported by the data model and
+API) would need a switcher UI added in a later milestone; nothing about the current design would
+need to change to add one.
+
+**Organization creation is transactional**
+(`apps/api/src/services/organization.service.ts#createOrganization`): organization, owner
+membership, initial business profile, and default (all-closed) business hours for all 7 days are
+created together via a `UnitOfWork` abstraction
+(`apps/api/src/repositories/unit-of-work.ts`) — the Postgres implementation wraps a real
+`db.transaction()`; the in-memory test implementation runs the same callback without transaction
+semantics (see §7's data-layer note on why this means transactional *rollback* itself is unverified
+here). An organization is never left without its owner membership by construction — there is no
+code path that creates one without the other.
+
+**Tenant isolation enforcement**: see §6. The short version — `requireOrgMembership` middleware,
+every repository method scoped by `organizationId` in the query, non-member requests get 404, and
+`apps/api/tests/organizations.test.ts` proves all of this with real HTTP requests, including the
+specific case of a spoofed `organizationId` in a request body being ignored in favor of the
+URL-derived, already-authorized value.
+
+**Frontend**: `apps/web/src/app/dashboard/page.tsx` (server component) fetches organizations,
+business profile, hours, and services server-side (forwarding cookies, same pattern as
+`lib/session.ts`), and renders `CreateOrganizationForm`, `BusinessProfileForm`,
+`BusinessHoursForm`, and `ServicesManager` (all client components under
+`apps/web/src/components/organizations/`) with that data as initial props. Every mutation is a
+real `fetch` call to the API with `credentials: 'include'` — none of it is mocked, and none of the
+frontend code makes any authorization decision; it only reflects what the API already decided.

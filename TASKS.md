@@ -230,6 +230,136 @@ not an oversight:
   for future dependency additions in this repo: verify the version that actually lands in
   `package.json`, don't trust that a bare `npm install <pkg>` always gets latest.
 
+## Completed — M3 Organizations and business configuration
+
+**Data model**
+- [x] `organizations` (id, name, slug unique), `organization_memberships`
+      (organization_id + user_id FK cascade, role `owner|member`, unique on the pair),
+      `business_profiles` (one per org — `organization_id` itself unique), `business_hours` (one
+      row per org+day-of-week, unique on the pair), `services` (name/duration/price/active) —
+      `apps/api/src/db/schema.ts`
+- [x] Migration generated (`0001_curly_forge.sql`) and inspected directly — every constraint
+      (FKs, uniques) confirmed present in the actual generated SQL, not just the schema source
+- [x] Verified the current (non-deprecated) Drizzle `pgTable` extraConfig API by reading the
+      installed type definitions before writing constraints — the array-return form, not the
+      deprecated object-return form most existing examples online still show
+
+**Persistence (repositories + transactional creation)**
+- [x] `OrganizationRepository`, `MembershipRepository`, `BusinessProfileRepository`,
+      `BusinessHoursRepository`, `ServiceRepository` interfaces + Postgres/Drizzle
+      implementations (`src/repositories/drizzle/*`) + in-memory test doubles
+      (`tests/support/in-memory-organization-repositories.ts`)
+- [x] `UnitOfWork` abstraction (`src/repositories/unit-of-work.ts`) so organization creation is
+      genuinely transactional against Postgres (`db.transaction()`) while still being testable
+      without one (in-memory implementation runs the same callback directly)
+- [x] Every service-lookup/update/delete repository method scoped by `organizationId` in the
+      same query as the id — the concrete mechanism that makes cross-tenant service access
+      impossible by construction, not just by convention
+
+**Services + tenant isolation middleware**
+- [x] `OrganizationService.createOrganization` — org + owner membership + initial business
+      profile + default (all-closed) business hours, all in one transaction; an organization is
+      never created without its owner membership by construction
+- [x] `BusinessProfileService`, `BusinessHoursService` (always returns exactly 7 entries,
+      filling in "closed" for any missing day), `ServicesCatalogService`
+- [x] `requireOrgMembership` middleware — the tenant-isolation enforcement point: reads
+      `:organizationId` from the URL but never trusts it, independently re-queries the database
+      for a real membership row on every request, returns 404 (not 403) for non-members
+
+**API**
+- [x] `POST/GET /organizations`, `GET/PATCH /organizations/:organizationId`,
+      `GET/PUT .../business-profile`, `GET/PUT .../business-hours`,
+      `GET/POST .../services`, `PATCH/DELETE .../services/:serviceId` — all behind `requireAuth`,
+      all but creation/listing additionally behind `requireOrgMembership`
+- [x] `zod` validation for every input (`src/validation/organization.schemas.ts`), including a
+      refinement rejecting business-hours payloads that don't cover all 7 days exactly once
+- [x] Fixed two real `exactOptionalPropertyTypes` compiler errors properly (widened the
+      `Update` interfaces to match zod's actual inferred shape, per TypeScript's own suggested
+      fix) rather than suppressing them
+
+**Frontend**
+- [x] `/dashboard` rewritten: shows `CreateOrganizationForm` if the user has no organization,
+      otherwise real `BusinessProfileForm`, `BusinessHoursForm`, `ServicesManager` — all real API
+      calls with `credentials: 'include'`, loading/saving/saved/error states, no mocked data
+- [x] No multi-organization switcher UI built (documented decision — see ARCHITECTURE.md §10);
+      the backend fully supports multiple memberships regardless
+
+**Tenant isolation tests (the core of M3) — `apps/api/tests/organizations.test.ts`**
+- [x] All 12 scenarios from the M3 brief, each a real HTTP request through the full middleware
+      stack: unauthenticated rejected; owner can access own org; a plain `member` (not owner) can
+      access their org; non-member rejected (404); changing the org id in a request cannot
+      bypass authorization (verified target data unchanged afterward); non-member cannot
+      read/write another org's business profile (verified unchanged); non-member cannot
+      list/modify/delete another org's service (verified unchanged); duplicate memberships
+      rejected; organization creation produces exactly one correct owner membership (not "at
+      least one" — counted); a spoofed `organizationId` in a request body cannot orphan a record
+      into another organization (verified via direct repository lookup, not just the response)
+- [x] Additional CRUD happy-path coverage: business profile get/update, business hours
+      get/replace (+ rejecting a payload missing a day), services create/update/delete, org
+      listing scoped to the caller's own memberships only
+- [x] 21 new tests, 34 total in `apps/api` (13 from M2 unchanged and still passing)
+
+**Documentation**
+- [x] ARCHITECTURE.md §6 (Multi-tenancy) rewritten from "design intent" to "implemented", with an
+      explicit note refining the original M1/M2 wording ("never from a client-supplied field") to
+      the more precise property that actually matters: independent re-authorization on every
+      request, regardless of where the id appears
+- [x] ARCHITECTURE.md §10 (Organizations) added; §2, §3, §7 updated where M3 changed them
+- [x] SECURITY.md §1 rewritten with per-bullet implementation status; new §3 "Tenant isolation
+      testing" documents all 12+ scenarios; §7 known gaps updated (RLS not implemented, no RBAC
+      beyond membership, Postgres-specific behavior — constraints, cascades, transaction
+      rollback — unverified)
+- [x] README.md, IMPLEMENTATION_PLAN.md updated; corrected a stale IMPLEMENTATION_PLAN.md claim
+      that M3 would implement Postgres RLS (it doesn't — only the application-layer half)
+
+**Verification actually run**
+- [x] `npm run typecheck -w apps/api` / `-w apps/web` — clean, after fixing real compiler errors
+      (not warnings) at each phase before moving on, not accumulated and fixed at the end
+- [x] `npm run lint -w apps/api` / `-w apps/web` — clean
+- [x] `npm run test -w apps/api` — 34/34 passing
+- [x] `npm run build -w apps/web` (`next build`) — succeeded; `/dashboard` correctly dynamic,
+      `/login`/`/register`/`/` correctly static
+- [x] Root aggregate `npm run lint`/`typecheck`/`test`/`build` — full-repo regression, all green
+- [x] `services/voice-agent` Python checks re-run (ruff/mypy/pytest) — unaffected, still passing
+- [x] `git diff`/`git status` inspected; secret scan run over the diff
+
+## Remaining M3 work
+
+None identified as blocking M3's stated scope. Explicitly out of scope by the brief itself, not
+an oversight:
+
+- [ ] Fine-grained RBAC beyond `owner`/`member` — explicitly excluded by the M3 brief; the `role`
+      column exists for a future milestone to use.
+- [ ] Multi-organization switcher UI — the data model and API fully support a user belonging to
+      multiple organizations; only the M3 frontend simplification (always show the first one) is
+      missing a switcher, by design (see ARCHITECTURE.md §10).
+- [ ] Applying `0001_curly_forge.sql` to a real Postgres instance — blocked on Docker being
+      unavailable in this environment, not on missing code.
+- [ ] Postgres Row-Level Security — documented as a defense-in-depth layer under the
+      application-layer scoping that's already implemented and tested; not built in M3.
+
+## Known limitations (M3 additions)
+
+- **Postgres-specific behavior remains unverified**: the real unique constraints (`slug`,
+  `(organization_id, user_id)`, `(organization_id, day_of_week)`), real foreign-key cascade
+  deletes, and real transaction rollback for organization creation are all implemented in the
+  schema/code but only exercised against in-memory test doubles, not actual Postgres. The
+  in-memory `UnitOfWork` in particular does **not** roll back partial writes on failure the way
+  the real `db.transaction()` does — a genuine behavioral gap between the test double and
+  production code, documented rather than glossed over.
+- **No RLS** — see SECURITY.md §7.
+- **No RBAC beyond membership** — any member can read/write the full organization configuration;
+  the `role` column is a deliberate placeholder for a future milestone, not wired to any
+  authorization check yet.
+- **Slug collision handling has a theoretical race condition** under true concurrent creation of
+  same-name organizations — the database's unique constraint is the real backstop, but a race
+  would currently surface as a 500 rather than a graceful retry. Acceptable at current scale.
+- **CSRF**: `SameSite=Lax` remains the only mitigation, now covering real mutating endpoints
+  (profile/hours/services writes) beyond just auth — see SECURITY.md §2/§7.
+- **No rate limiting** on organization creation — a user could create many organizations in quick
+  succession. Not currently a concern at this scale; would matter if abuse potential increases
+  (e.g. once billing exists and organization count has cost implications).
+
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M3 through M13.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M4 through M13.

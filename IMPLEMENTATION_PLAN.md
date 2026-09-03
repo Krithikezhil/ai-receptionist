@@ -23,9 +23,11 @@ verification, and MFA are deferred — see SECURITY.md known gaps.
 ## M3 — Organizations and business configuration
 
 Introduces the `organizations` table and every table depending on `organization_id`
-(users-to-org membership, business configuration/profile). First milestone with a real database
-schema and migrations. Implements the multi-tenant enforcement strategy documented in
-ARCHITECTURE.md §6 (data-access layer scoping + Postgres RLS) — not just documents it.
+(organization memberships, business profile, business hours, service catalog). Implements the
+application-layer half of the multi-tenant enforcement strategy documented in ARCHITECTURE.md §6
+(membership re-verified server-side on every request, every query scoped by `organizationId`) —
+not just documents it, and proves it with tenant-isolation tests. Postgres Row-Level Security
+(the strategy's other, defense-in-depth half) remains unimplemented — see SECURITY.md known gaps.
 
 ## M4 — AI voice agent
 

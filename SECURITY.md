@@ -1,30 +1,37 @@
 # Security
 
-Status: **M2 — Authentication**, building on M1. This document covers (a) the multi-tenant
-isolation strategy this codebase commits to, (b) the authentication/session security design, and
-(c) the security posture of what actually exists today. Full security hardening/testing is
-milestone **M12** in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document will keep
-growing with each milestone that adds real attack surface (tenant data in M3, payment handling in
-M11, etc.).
+Status: **M3 — Organizations and business configuration**, building on M1/M2. This document
+covers (a) the multi-tenant isolation strategy and what actually enforces it as of M3, (b) the
+authentication/session security design, and (c) the security posture of what actually exists
+today. Full security hardening/testing is milestone **M12** in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps growing with each milestone
+that adds real attack surface (payment handling in M11, etc.).
 
 ## 1. Multi-tenant isolation
 
-Full detail and rationale live in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy). Summary
-of the binding rules for every future milestone:
+Full detail and rationale live in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy) and §10.
+Binding rules, and their implementation status as of M3:
 
 * Tenant = organization. Every org-scoped table gets a non-nullable, indexed `organization_id`.
+  **Implemented** for `business_profiles`, `business_hours`, `services`.
 * **The frontend is never the isolation boundary.** UI-level filtering is a UX convenience only;
-  it must never be the only thing preventing cross-tenant access.
-* Tenant context comes only from the authenticated session server-side, never from a
-  client-supplied field. A caller cannot request another organization's `organization_id` and
-  have it honored.
-* All org-scoped queries go through a data-access layer that requires tenant context to run —
-  not ad-hoc queries that individually remember to filter.
-* PostgreSQL Row-Level Security is the defense-in-depth layer under the application-layer
-  scoping, once real tables exist (M3+).
-* Missing/invalid tenant context fails closed (zero rows), never open (all rows).
-* No tenant-scoped data exists yet (M2 added `users`, but not organization-scoped) — the above is
-  a binding design commitment for M3 onward, not a claim about current code.
+  it must never be the only thing preventing cross-tenant access. **Implemented and tested** — see
+  §3.
+* The organization named in a request is never trusted merely because it's present — access is
+  independently re-authorized against the database on every request
+  (`requireOrgMembership` middleware). A caller cannot access, read, or write another
+  organization's data by naming its id, in the URL or anywhere else. **Implemented and tested.**
+* All org-scoped queries go through a data-access layer that requires an `organizationId` argument
+  to compile/run, and every id-based lookup/update/delete filters by `organizationId` in the same
+  query — not ad-hoc queries that individually remember to filter. **Implemented.**
+* PostgreSQL Row-Level Security as defense-in-depth under the application-layer scoping —
+  **not implemented yet**. The application-layer scoping above is the only enforcement currently
+  in place. See §7 known gaps.
+* Missing/invalid tenant context fails closed (404, not a leaked "forbidden" that confirms
+  existence, and never an unscoped query returning everything). **Implemented and tested.**
+* Duplicate memberships for the same `(organization, user)` pair are rejected (unique constraint
+  in the migration; the in-memory test double mirrors the same behavior since Postgres itself is
+  unverified — see §6). **Implemented and tested.**
 
 ## 2. Authentication and session security
 
@@ -33,18 +40,23 @@ the authoritative list of what was actually built and verified.
 
 ### Backend security boundary (read this first)
 
-**The backend is authoritative for authentication. The frontend is never the security boundary.**
+**The backend is authoritative for authentication and authorization. The frontend is never the
+security boundary — for auth or for tenant access.**
 
 * `apps/api/src/middleware/require-auth.ts` independently validates the session token
-  server-side on every request to a protected endpoint (currently `GET /auth/me`). It does not
-  trust the mere presence of a cookie — an invalid, forged, or expired token is rejected (401)
-  regardless of what the cookie claims. This is proven by an automated test that sends a garbage
-  cookie value directly to the API and confirms it's rejected (`apps/api/tests/auth.test.ts`).
-* `apps/web`'s `/dashboard` page performs its own check by calling the API's `/auth/me` — but
-  this exists purely for UX (avoiding rendering a page the user can't use). If that frontend
-  check were removed, deleted, or bypassed entirely, the API would still refuse every protected
-  request from an unauthenticated caller. No endpoint's real protection depends on frontend code
-  running, existing, or being honest.
+  server-side on every request to a protected endpoint. It does not trust the mere presence of a
+  cookie — an invalid, forged, or expired token is rejected (401) regardless of what the cookie
+  claims. Proven by an automated test that sends a garbage cookie value directly to the API and
+  confirms it's rejected (`apps/api/tests/auth.test.ts`).
+* `apps/api/src/middleware/require-org-membership.ts` independently re-verifies, against the
+  database, that the authenticated user actually belongs to the organization named in the URL —
+  on every single request, for every organization-scoped endpoint. See §3.
+* `apps/web`'s `/dashboard` page performs its own auth check (calling the API's `/auth/me`) and
+  simply displays whatever organizations the API says the user belongs to — but this exists purely
+  for UX. If all frontend checks were removed, deleted, or bypassed entirely, the API would still
+  independently refuse every unauthenticated request and every request naming an organization the
+  caller isn't a member of. No endpoint's real protection depends on frontend code running,
+  existing, or being honest.
 
 ### Password storage
 
@@ -91,32 +103,75 @@ the authoritative list of what was actually built and verified.
   from "wrong password."
 * `POST /auth/register` **does** disclose "an account with this email already exists" (409) —
   a deliberate, standard UX trade-off (a legitimate user needs to be told to log in instead), not
-  an oversight. Full registration-side enumeration resistance was judged not worth the UX cost for
-  M2; login/credential-stuffing is the higher-value target this design protects.
+  an oversight.
+* Organization-scoped endpoints return the same 404 whether an organization doesn't exist or the
+  caller just isn't a member of it — a non-member can't use these endpoints to enumerate which
+  organization ids exist. See §1.
 * **Not implemented yet**: rate limiting / account lockout after repeated failed attempts. A
   determined attacker can currently attempt unlimited login guesses against a known email. This
-  is the most significant near-term hardening gap — see §6.
+  remains the most significant near-term hardening gap — see §7.
 
 ### CSRF
 
 * `SameSite=Lax` on the session cookie is the primary mitigation: genuinely cross-site requests
   (a form or script on another domain) do not carry the cookie, so they can't act as the
-  authenticated user.
-* **Not implemented**: a double-submit CSRF token for defense-in-depth beyond `SameSite`. Adequate
-  for M2's scope (no state-changing, high-value actions exist yet beyond auth itself); revisit
-  once M3+ adds real mutating endpoints — see §6.
+  authenticated user. This now also covers every M3 mutating endpoint (organization/profile/
+  hours/services writes), not just auth.
+* **Not implemented**: a double-submit CSRF token for defense-in-depth beyond `SameSite`. M3 adds
+  real mutating endpoints (business profile, hours, services), which raises the value of this
+  hardening item — see §7.
 
 ### Input validation
 
-* All auth request bodies are validated with `zod` (`apps/api/src/validation/auth.schemas.ts`)
-  before touching business logic — rejected with 400 (register) before any database or hashing
-  work happens. Login validation failures return 401 with the same generic message as bad
-  credentials, so malformed input can't be used to distinguish anything.
+* All auth and organization request bodies are validated with `zod`
+  (`apps/api/src/validation/auth.schemas.ts`, `organization.schemas.ts`) before touching business
+  logic. Login validation failures return 401 with the same generic message as bad credentials, so
+  malformed input can't be used to distinguish anything.
 * Password minimum length is 8 characters, no forced complexity rules — current NIST 800-63B
   guidance favors length over mandated character-class composition. No check against known-breach
-  password lists yet (a reasonable future hardening item, not done in M2).
+  password lists yet (a reasonable future hardening item).
+* Business hours validation requires all 7 days present exactly once, and that open days have
+  `openTime < closeTime`, rejecting malformed schedules before they reach the database.
 
-## 3. Secrets and environment variables
+## 3. Tenant isolation testing
+
+This is the most safety-critical part of M3, so it gets its own section rather than being folded
+into §1. `apps/api/tests/organizations.test.ts` exercises the **real HTTP layer** (Supertest
+against the full Express app, including both `requireAuth` and `requireOrgMembership`
+middleware) — not the service layer in isolation, so the tests prove what an actual attacker
+would experience, not just what the code is intended to do. Verified scenarios, each an
+automated, passing test:
+
+1. An unauthenticated request to an organization endpoint is rejected (401).
+2. An authenticated user can access an organization they created (200).
+3. A user added as a plain `"member"` (not `"owner"`) can access the organization they belong to
+   (200) — membership alone is sufficient, no owner-only gate blocks ordinary members.
+4. A user who does not belong to an organization cannot access it by naming its real id (404).
+5. **Changing the organization id in a request cannot bypass authorization**: an outsider who has
+   their own, different organization attempts to `PATCH` another organization's real id directly
+   — rejected (404), and the target organization's data is confirmed unchanged afterward.
+6. A user cannot read another organization's business profile (404).
+7. A user cannot modify another organization's business profile (404), and the profile is
+   confirmed unchanged in the repository directly (not just via the rejected response).
+8. A user cannot list another organization's services (404).
+9. A user cannot modify or delete another organization's service (404 on both), and the service is
+   confirmed still present and unmodified afterward.
+10. Duplicate memberships for the same `(organization, user)` pair are rejected.
+11. Organization creation produces *exactly* one membership for the creator, with `role: "owner"`
+    — checked by listing all memberships for that user and asserting there's exactly one, not just
+    that an owner membership exists somewhere.
+12. **A spoofed `organizationId` in a request body cannot orphan a record into another
+    organization**: an outsider POSTs a new service to their *own* organization's URL while
+    including a different (victim) organization's id in the request body. The created service is
+    confirmed to belong to the URL's organization — the body-supplied id has no effect, and the
+    victim organization's service list is confirmed not to contain it.
+
+Additional coverage beyond the 12 required scenarios: full CRUD happy-path tests for business
+profile, business hours (including rejecting a hours payload missing a day), and services
+(create/update/delete), plus a check that `GET /organizations` only ever lists organizations the
+caller actually belongs to.
+
+## 4. Secrets and environment variables
 
 * No `.env` file exists in this repository and none was created during setup — only
   `.env.example`, which contains placeholders (empty strings or example/default-dev values),
@@ -126,63 +181,77 @@ the authoritative list of what was actually built and verified.
 * `apps/api`'s logger (`pino`, in `src/config/logger.ts`) redacts `req.headers.authorization` and
   `req.headers.cookie` from all log output. No code path logs environment variables, request
   bodies, or passwords wholesale — pino-http's default request serializer logs method/url/headers
-  only, never the body, which is where a password would appear.
-* `AUTH_SECRET` is the first genuinely required secret (see §2) — required at startup, no
+  only, never the body.
+* `AUTH_SECRET` is the only genuinely required secret (see §2) — required at startup, no
   code-level default, generation instructions in `.env.example`.
 * Placeholder variables for not-yet-built integrations (Stripe, Twilio, OpenAI, Deepgram,
-  Cartesia, ElevenLabs, Google) remain in `.env.example` as empty values — documenting the future
-  config surface without implying they're used anywhere yet.
+  Cartesia, ElevenLabs, Google) remain in `.env.example` as empty values.
 
-## 4. Current attack surface
+## 5. Current attack surface
 
 Being explicit about what exists so this section stays honest rather than aspirational:
 
-* `apps/api`: `GET /health` (no auth, no sensitive data). `POST /auth/register`,
-  `POST /auth/login`, `POST /auth/logout` (no auth required — that's the point). `GET /auth/me`
-  (requires a valid session). `helmet` applies baseline security headers; `cors` restricts browser
-  callers to `WEB_ORIGIN` with `credentials: true` (required for the session cookie to work
-  across `apps/web`'s and `apps/api`'s different ports in local dev).
+* `apps/api`: `GET /health` (no auth). Auth endpoints (`POST /auth/register|login|logout`,
+  `GET /auth/me`) — see §2. Organization endpoints (`POST/GET /organizations`,
+  `GET/PATCH /organizations/:organizationId`, business-profile/business-hours/services
+  sub-resources) — all require authentication, and all but creation/listing additionally require
+  verified membership. `helmet` applies baseline security headers; `cors` restricts browser
+  callers to `WEB_ORIGIN` with `credentials: true`.
 * `services/voice-agent` exposes exactly one route, `GET /health`, no auth.
-* `apps/web` serves `/`, `/login`, `/register` (forms that call the API directly), and
-  `/dashboard` (authenticated placeholder, no real data). No payment forms, no PII collection
-  beyond email/password.
-* Postgres has a real schema as of M2 (`users`, `sessions`) but has not been connected to in this
-  environment (Docker unavailable) — see [DEPLOYMENT.md](DEPLOYMENT.md) and
+* `apps/web` serves `/`, `/login`, `/register`, and `/dashboard` (real organization creation and
+  business-profile/hours/services configuration UI — no mocked data, no fake product features).
+  No payment forms, no PII collection beyond email/password/business contact info.
+* Postgres has a real schema (`users`, `sessions`, `organizations`, `organization_memberships`,
+  `business_profiles`, `business_hours`, `services`) but **has not been connected to in this
+  environment** (Docker unavailable) — see [DEPLOYMENT.md](DEPLOYMENT.md) and
   [ARCHITECTURE.md §7](ARCHITECTURE.md#7-data-layer).
 * No third-party API keys are used by any code path yet.
 
-## 5. Dependencies
+## 6. Dependencies
 
 * Dependency versions were checked against the npm registry at implementation time — see
-  [ARCHITECTURE.md](ARCHITECTURE.md) and [TASKS.md](TASKS.md) for specifics (e.g. why TypeScript
-  stayed on 5.9.x, why `apps/web` stayed on ESLint 9 while `apps/api`/`packages/shared` use
-  ESLint 10, why Drizzle was chosen over Prisma, why `argon2` over `bcrypt`).
+  [ARCHITECTURE.md](ARCHITECTURE.md) and [TASKS.md](TASKS.md) for specifics.
 * `npm install` reported 0 vulnerabilities for the M1 dependency set.
-* **New in M2**: `drizzle-kit@0.31.10` (the current latest release) has a transitive dependency on
-  a deprecated, vulnerable `@esbuild-kit/esm-loader` (`npm audit` reports 4 moderate advisories
-  under it). This is a **devDependency only** — never shipped in the running API — used solely to
-  transpile `drizzle.config.ts` when generating migrations locally. The underlying advisory
-  concerns an exposed esbuild dev-server, which this loader does not start for one-shot config
-  loading. No newer `drizzle-kit` release fixes this yet; forcing a downgrade (as `npm audit fix
-  --force` suggests) would move to an old, likely-incompatible version. Tracked as a known
-  limitation to revisit (§6), not treated as a runtime security issue.
-* `argon2` (ranisalt/node-argon2) confirmed actively maintained (published within the last two
-  months at implementation time) and installs cleanly on this Windows dev machine via prebuilt
-  binaries (no native build toolchain required).
+* `drizzle-kit@0.31.10` (the current latest release) has a transitive dependency on a deprecated,
+  vulnerable `@esbuild-kit/esm-loader` (`npm audit` reports 4 moderate advisories under it). This
+  is a **devDependency only** — never shipped in the running API — used solely to transpile
+  `drizzle.config.ts` when generating migrations locally. The underlying advisory concerns an
+  exposed esbuild dev-server, which this loader does not start for one-shot config loading. No
+  newer `drizzle-kit` release fixes this yet. Tracked as a known limitation, not a runtime issue.
+* `argon2` (ranisalt/node-argon2) confirmed actively maintained and installs cleanly on this
+  Windows dev machine via prebuilt binaries.
+* No new runtime dependencies were added in M3 (organizations/business-config uses the same
+  Drizzle/zod/Express stack already in place from M1/M2) — deliberately, per the "avoid
+  unnecessary dependencies" instruction.
 
-## 6. Known gaps (expected at this stage — see TASKS.md)
+## 7. Known gaps (expected at this stage — see TASKS.md)
 
 * **No rate limiting or account lockout** on `/auth/login` or `/auth/register` — the most
-  significant near-term hardening item. Recommend adding before any production traffic.
-* **No CSRF token** beyond `SameSite=Lax` — acceptable for M2's limited mutating surface, should
-  be revisited once M3 adds real state-changing endpoints.
-* **No email verification** — an account is usable immediately after registration with an
-  unverified email address.
-* **No password reset flow** — a user who forgets their password currently has no recovery path.
-* **No MFA.**
+  significant near-term hardening item, now joined by the M3 mutating endpoints as additional
+  surface that would benefit from it.
+* **No CSRF token** beyond `SameSite=Lax` — M3 adds real mutating endpoints, raising the value of
+  this hardening item for M12.
+* **No PostgreSQL Row-Level Security** — application-layer scoping (`requireOrgMembership` +
+  per-query `organizationId` filtering) is the only enforcement currently in place. RLS would be a
+  genuine defense-in-depth addition, not a currently-missing requirement (the application-layer
+  checks are independently tested and sufficient on their own).
+* **No email verification, no password reset flow, no MFA.**
+* **No fine-grained RBAC** — any membership (`owner` or `member`) currently grants full read/write
+  access to that organization's profile/hours/services. The `role` column exists for a future
+  milestone to use; M3 deliberately doesn't build on it yet (explicitly out of scope per the M3
+  brief).
 * **No CI-enforced security scanning** (`npm audit`, `pip-audit`, secret scanning) — planned for
   M12.
 * **No dependency-update automation** (Dependabot/Renovate) configured yet.
-* **Postgres/session-store integration is untested against a real database** — Docker unavailable
-  in this environment; verified instead via in-memory repository test doubles exercising the same
-  interfaces (see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication)).
+* **Postgres integration is untested against a real database** — Docker unavailable in this
+  environment; verified instead via in-memory repository test doubles exercising the same
+  interfaces (see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication) / §10). Specifically
+  unverified: the real unique constraints (`slug`, `(organization_id, user_id)`,
+  `(organization_id, day_of_week)`), the real foreign-key cascade deletes, and real transaction
+  rollback behavior for organization creation (the in-memory `UnitOfWork` does not actually roll
+  back partial writes on failure, unlike the Postgres implementation's real `db.transaction()`).
+* **Slug collision handling has a theoretical race condition**: concurrent creation of two
+  organizations with the same name could both pass the in-application collision check before
+  either commits. The database's unique constraint on `slug` is the real backstop, but a race
+  would currently surface as a 500 rather than a graceful retry. Not fixed in M3 (acceptable at
+  current scale); worth revisiting if organization creation becomes high-throughput.

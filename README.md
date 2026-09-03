@@ -5,12 +5,13 @@ conversations, business-specific knowledge, lead capture, appointment booking, S
 human call transfers, call transcripts/summaries, business analytics, usage tracking, and Stripe
 subscriptions.
 
-**Status: M2 — Authentication.** None of the product features above (calling, AI conversations,
-leads, appointments, billing, etc.) are implemented yet. This repository currently contains the
-M1 monorepo foundation plus user registration/login/logout/sessions — real accounts, but no
-organizations, tenants, or product data yet. See [TASKS.md](TASKS.md) for exactly what exists
-today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full milestone sequence
-(M1–M13).
+**Status: M3 — Organizations and business configuration.** None of the product features above
+(calling, AI conversations, leads, appointments, billing, etc.) are implemented yet. This
+repository currently contains the M1 monorepo foundation, M2 authentication (real accounts,
+sessions), and M3 organizations — an authenticated user can create an organization and configure
+its business profile, weekly hours, and a service catalog. See [TASKS.md](TASKS.md) for exactly
+what exists today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full milestone
+sequence (M1–M13).
 
 ## Architecture (high level)
 
@@ -32,10 +33,12 @@ Argon2id password hashing, real Postgres schema via Drizzle ORM. The backend ind
 verifies every authenticated request — the frontend's route protection is UX only, never the
 security boundary. Full design: [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication).
 
-**Multi-tenancy** is designed in from day one even though no tenant-scoped data exists yet: the
-tenant boundary is the organization, isolation is never enforced only in the frontend, and the
-intended enforcement (server-derived tenant context + Postgres Row-Level Security) is documented
-in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy) ahead of M3 implementing it.
+**Multi-tenancy** (M3): the organization is the tenant boundary. Every organization-scoped
+request is independently re-verified against real membership data server-side — never trusted
+because an id appears in a URL, a form field, or anywhere client-controlled. Proven by automated
+tests that attempt exactly that (changing an organization id in a request, spoofing an id in a
+request body) and confirm they're rejected. Full design and test list:
+[ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy)/§10, [SECURITY.md §1](SECURITY.md)/§3.
 
 **Voice infrastructure** will use [Pipecat](https://github.com/pipecat-ai/pipecat) starting at
 M4, added as a normal dependency against the then-current official package/docs — not vendored
@@ -93,16 +96,21 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 
 ## Current limitations
 
-* No organizations, tenants, business profiles, or any product data — deferred to M3 by design.
-  Authentication (real accounts, sessions) exists; multi-tenancy does not yet.
+* No calls, leads, appointments, knowledge base, phone numbers, or billing — deferred to later
+  milestones by design. Organizations, business profiles, weekly hours, and a service catalog
+  exist as of M3; nothing beyond that.
+* No fine-grained RBAC — any organization member (owner or plain member) currently has full
+  read/write access to that organization's configuration. See [SECURITY.md](SECURITY.md).
 * No Twilio, no phone calls, no AI conversation, no STT/TTS/LLM integration, no Stripe, no
   Google Calendar, no SMS, no RAG/vector database. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
   for when each lands.
-* No rate limiting / brute-force protection on login or registration, no email verification, no
-  password reset flow, no MFA — see [SECURITY.md](SECURITY.md) for the full list of known gaps.
-* Postgres has a real schema (users, sessions) but **has not been tested against a real database**
-  in this environment — Docker is unavailable here. Auth logic was verified via in-memory test
-  doubles exercising the same code paths — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication).
+* No rate limiting / brute-force protection on login or registration, no CSRF token beyond
+  `SameSite`, no email verification, no password reset flow, no MFA, no Postgres Row-Level
+  Security — see [SECURITY.md](SECURITY.md) for the full list of known gaps.
+* Postgres has a real schema (users, sessions, organizations, memberships, business profiles,
+  hours, services) but **has not been tested against a real database** in this environment —
+  Docker is unavailable here. All logic was verified via in-memory test doubles exercising the
+  same code paths — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication)/§10.
 * `services/voice-agent`'s `/health` (and `apps/api`'s `GET /health`) do not check database/Redis
   connectivity.
 * Docker Compose for Postgres/Redis exists but was only validated as syntactically-correct YAML;
@@ -112,7 +120,7 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 
 ## Future milestones
 
-M3 Organizations & business configuration · M4 AI voice agent (Pipecat) · M5 Twilio inbound
-calls · M6 Knowledge base/RAG · M7 Lead capture · M8 Appointment booking · M9 SMS · M10 Dashboard
-· M11 Stripe billing · M12 Security and testing · M13 Production deployment. Details:
+M4 AI voice agent (Pipecat) · M5 Twilio inbound calls · M6 Knowledge base/RAG · M7 Lead capture ·
+M8 Appointment booking · M9 SMS · M10 Dashboard · M11 Stripe billing · M12 Security and testing ·
+M13 Production deployment. Details:
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).

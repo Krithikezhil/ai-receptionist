@@ -1,11 +1,13 @@
 import { Router } from "express";
-import type { AuthService } from "../services/auth.service.js";
+import type { OrganizationRouterDeps } from "./organizations.routes.js";
+import { createOrganizationsRouter } from "./organizations.routes.js";
 import { createAuthRouter } from "./auth.routes.js";
 import { healthRouter } from "./health.routes.js";
 
-export function createApiRouter(authService: AuthService): Router {
+export function createApiRouter(orgDeps: OrganizationRouterDeps): Router {
   const router = Router();
   router.use("/health", healthRouter);
-  router.use("/auth", createAuthRouter(authService));
+  router.use("/auth", createAuthRouter(orgDeps.authService));
+  router.use("/organizations", createOrganizationsRouter(orgDeps));
   return router;
 }
