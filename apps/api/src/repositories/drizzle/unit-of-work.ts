@@ -4,6 +4,7 @@ import { createDrizzleBusinessHoursRepository } from "./business-hours.repositor
 import { createDrizzleBusinessProfileRepository } from "./business-profile.repository.js";
 import { createDrizzleMembershipRepository } from "./membership.repository.js";
 import { createDrizzleOrganizationRepository } from "./organization.repository.js";
+import { createDrizzleReceptionistConfigRepository } from "./receptionist-config.repository.js";
 
 export function createDrizzleUnitOfWork(db: Database): UnitOfWork {
   return {
@@ -14,6 +15,7 @@ export function createDrizzleUnitOfWork(db: Database): UnitOfWork {
           memberships: createDrizzleMembershipRepository(tx),
           businessProfiles: createDrizzleBusinessProfileRepository(tx),
           businessHours: createDrizzleBusinessHoursRepository(tx),
+          receptionistConfigs: createDrizzleReceptionistConfigRepository(tx),
         };
         return fn(repos);
       });

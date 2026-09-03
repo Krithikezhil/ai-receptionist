@@ -4,6 +4,13 @@ Milestone sequence for AI Receptionist. Each milestone is scoped to be independe
 and reviewable — later milestones' scope may be refined as earlier ones land, but the sequence
 and boundaries below are the current plan.
 
+**Note on M4**: this file originally sketched M4 as "AI voice agent." When M4 was actually
+scoped, business knowledge and receptionist configuration were identified as a real prerequisite
+the voice agent needs (it has to read *something* to answer calls) and split out as their own
+milestone first. Everything from the original M4 onward shifted down by one — this is the kind of
+"later milestones' scope may be refined" adjustment this file's own header anticipates, not a
+silent renumbering.
+
 ## M1 — Foundation (this milestone)
 
 Monorepo scaffolding, framework bootstraps (Next.js, Express, FastAPI), shared TypeScript
@@ -29,52 +36,66 @@ application-layer half of the multi-tenant enforcement strategy documented in AR
 not just documents it, and proves it with tenant-isolation tests. Postgres Row-Level Security
 (the strategy's other, defense-in-depth half) remains unimplemented — see SECURITY.md known gaps.
 
-## M4 — AI voice agent
+## M4 — Business knowledge and AI receptionist configuration
+
+Tenant-scoped knowledge base (manual entries: FAQ/policy/service-info/custom — no web crawling,
+no chunking/embeddings yet) and a provider-agnostic receptionist configuration (greeting, tone,
+instructions, enable/disable — no vendor fields, always created disabled). Defines the "future
+voice-agent contract" (ARCHITECTURE.md §11): REST endpoints the eventual Pipecat runtime will read
+from, reusing the existing user-authenticated tenant-isolation model rather than building
+inter-service auth prematurely. No live calling, no LLM/STT/TTS/provider integration — see
+SECURITY.md known gaps for what's explicitly deferred.
+
+## M5 — AI voice agent
 
 Integrates Pipecat (current official package, current official docs — not vendored/forked) into
 `services/voice-agent`. LLM integration (OpenAI), STT (Deepgram), TTS (Cartesia and/or
-ElevenLabs). Voice conversations are not connected to real phone calls yet in this milestone —
-that's M5.
+ElevenLabs). Consumes the M4 contract (business profile/hours/services/knowledge/receptionist
+config) — which requires designing the inter-service authentication mechanism M4 deliberately
+deferred. Voice conversations are not connected to real phone calls yet in this milestone —
+that's M6.
 
-## M5 — Twilio inbound calls
+## M6 — Twilio inbound calls
 
-Twilio phone number provisioning and inbound call handling, wired into the M4 voice agent.
+Twilio phone number provisioning and inbound call handling, wired into the M5 voice agent.
 Outbound calling is out of scope here and is not currently planned as a near-term milestone.
 
-## M6 — Knowledge base / RAG
+## M7 — Knowledge retrieval / RAG
 
-Per-organization knowledge ingestion and retrieval so the voice agent can answer
-business-specific questions. Vector database selection happens at the start of this milestone
-(not decided yet).
+Extends M4's `knowledge_entries` with chunking and embeddings (a new, additive table — see
+ARCHITECTURE.md §11 for why the M4 schema was deliberately shaped to allow this without a
+redesign) and vector-based retrieval so the voice agent can answer business-specific questions
+from a larger knowledge base than fits in a single prompt. Vector database selection happens at
+the start of this milestone (not decided yet).
 
-## M7 — Lead capture
+## M8 — Lead capture
 
 Structured lead capture from calls (contact info, intent, notes), stored per-organization.
 
-## M8 — Appointment booking
+## M9 — Appointment booking
 
 Calendar integration (Google Calendar) and booking flow driven by the voice agent.
 
-## M9 — SMS
+## M10 — SMS
 
 SMS confirmations/reminders for bookings and leads (Twilio SMS).
 
-## M10 — Dashboard
+## M11 — Dashboard
 
 Customer-facing dashboard in `apps/web`: call transcripts, call summaries, leads, appointments,
 business analytics, usage tracking.
 
-## M11 — Stripe billing
+## M12 — Stripe billing
 
 Subscription plans, metered usage billing, Stripe webhook handling, billing UI.
 
-## M12 — Security and testing
+## M13 — Security and testing
 
 Dedicated hardening pass: CI-enforced dependency scanning (`npm audit`, `pip-audit`, secret
 scanning), tenant-isolation test coverage across every org-scoped endpoint introduced since M3,
 rate limiting, load testing on the voice path.
 
-## M13 — Production deployment
+## M14 — Production deployment
 
 Target platform selection, CI/CD pipeline, container images for `apps/api` and
 `services/voice-agent`, secrets management, staging/production environment setup, observability

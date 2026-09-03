@@ -1,25 +1,9 @@
 import request from "supertest";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildTestApp } from "./support/build-test-app.js";
+import { createOrg, registerAgent, type TestAppContext } from "./support/http-helpers.js";
 
-type Ctx = ReturnType<typeof buildTestApp>;
-
-async function registerAgent(ctx: Ctx, email: string) {
-  const agent = request.agent(ctx.app);
-  const res = await agent
-    .post("/auth/register")
-    .send({ email, password: "correct horse battery staple" });
-  return { agent, userId: res.body.user.id as string };
-}
-
-async function createOrg(agent: ReturnType<typeof request.agent>, name: string) {
-  const res = await agent.post("/organizations").send({ name });
-  return res.body as {
-    organization: { id: string; name: string; slug: string };
-    membership: { role: string; userId: string; organizationId: string };
-    businessProfile: { id: string; organizationId: string; businessName: string };
-  };
-}
+type Ctx = TestAppContext;
 
 describe("POST /organizations (creation)", () => {
   let ctx: Ctx;
@@ -49,10 +33,19 @@ describe("POST /organizations (creation)", () => {
       organizationId: res.body.organization.id,
       businessName: "Acme Dental",
     });
+    // M4: a default receptionist configuration is seeded too, and it must
+    // always be disabled — organization creation must never activate it.
+    expect(res.body.receptionistConfig).toMatchObject({
+      organizationId: res.body.organization.id,
+      enabled: false,
+      displayName: "AI Receptionist",
+    });
 
     // Verify directly against the repository too, not just the HTTP response.
     const membership = await ctx.memberships.findByOrgAndUser(res.body.organization.id, userId);
     expect(membership?.role).toBe("owner");
+    const config = await ctx.receptionistConfigs.findByOrganizationId(res.body.organization.id);
+    expect(config?.enabled).toBe(false);
   });
 
   it("rejects invalid organization creation input", async () => {

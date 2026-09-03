@@ -19,6 +19,7 @@ export function createOrganizationController(orgService: OrganizationService) {
         organization: result.organization,
         membership: result.membership,
         businessProfile: result.businessProfile,
+        receptionistConfig: result.receptionistConfig,
       });
     },
 

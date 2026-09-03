@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { createBusinessHoursController } from "../controllers/business-hours.controller.js";
 import { createBusinessProfileController } from "../controllers/business-profile.controller.js";
+import { createKnowledgeController } from "../controllers/knowledge.controller.js";
 import { createOrganizationController } from "../controllers/organization.controller.js";
+import { createReceptionistConfigController } from "../controllers/receptionist-config.controller.js";
 import { createServiceCatalogController } from "../controllers/service-catalog.controller.js";
 import { requireAuth } from "../middleware/require-auth.js";
 import { requireOrgMembership } from "../middleware/require-org-membership.js";
@@ -9,7 +11,9 @@ import type { MembershipRepository } from "../repositories/organization-types.js
 import type { AuthService } from "../services/auth.service.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
+import type { KnowledgeService } from "../services/knowledge.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
+import type { ReceptionistConfigService } from "../services/receptionist-config.service.js";
 import type { ServicesCatalogService } from "../services/services-catalog.service.js";
 
 export interface OrganizationRouterDeps {
@@ -19,6 +23,8 @@ export interface OrganizationRouterDeps {
   businessProfileService: BusinessProfileService;
   businessHoursService: BusinessHoursService;
   servicesCatalogService: ServicesCatalogService;
+  knowledgeService: KnowledgeService;
+  receptionistConfigService: ReceptionistConfigService;
 }
 
 export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router {
@@ -30,6 +36,8 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   const profile = createBusinessProfileController(deps.businessProfileService);
   const hours = createBusinessHoursController(deps.businessHoursService);
   const catalog = createServiceCatalogController(deps.servicesCatalogService);
+  const knowledge = createKnowledgeController(deps.knowledgeService);
+  const receptionistConfig = createReceptionistConfigController(deps.receptionistConfigService);
 
   router.post("/", auth, org.create);
   router.get("/", auth, org.list);
@@ -46,6 +54,14 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   router.post("/:organizationId/services", auth, membership, catalog.create);
   router.patch("/:organizationId/services/:serviceId", auth, membership, catalog.update);
   router.delete("/:organizationId/services/:serviceId", auth, membership, catalog.remove);
+
+  router.get("/:organizationId/knowledge", auth, membership, knowledge.list);
+  router.post("/:organizationId/knowledge", auth, membership, knowledge.create);
+  router.patch("/:organizationId/knowledge/:knowledgeId", auth, membership, knowledge.update);
+  router.delete("/:organizationId/knowledge/:knowledgeId", auth, membership, knowledge.remove);
+
+  router.get("/:organizationId/receptionist-config", auth, membership, receptionistConfig.get);
+  router.put("/:organizationId/receptionist-config", auth, membership, receptionistConfig.update);
 
   return router;
 }

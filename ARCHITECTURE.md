@@ -1,9 +1,9 @@
 # Architecture
 
-Status: **M2 — Authentication**, building on the M1 foundation. This document describes the
-structure established so far and the design intent for pieces that don't exist as code yet
-(marked explicitly). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the milestone
-sequence.
+Status: **M4 — Business knowledge and AI receptionist configuration**, building on M1–M3. This
+document describes the structure established so far and the design intent for pieces that don't
+exist as code yet (marked explicitly). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for
+the milestone sequence.
 
 ## 1. Monorepo layout
 
@@ -39,10 +39,10 @@ Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4. Scaffolded with t
 `create-next-app` CLI and left structurally as generated (App Router, `src/` layout,
 `@/*` import alias) — no custom framework wiring was introduced.
 
-Routes as of M3: `/` (status page), `/login`, `/register` (client-side forms calling the API
+Routes as of M4: `/` (status page), `/login`, `/register` (client-side forms calling the API
 directly), `/dashboard` (server-rendered; shows an organization-creation form if the user has
-none, otherwise a real business-profile/hours/services configuration UI — see §10). No real
-product UI (calling, booking, billing, etc.) exists.
+none, otherwise a real business-profile/hours/services/knowledge/receptionist-configuration UI —
+see §10, §11). No real product UI (calling, booking, billing, etc.) exists.
 
 ## 3. apps/api — Backend API
 
@@ -55,7 +55,7 @@ src/
   auth/           password hashing, session token generation/validation, cookie helpers
   repositories/   repository interfaces + Postgres (Drizzle) implementations, unit-of-work (§10)
   services/       business logic, framework-agnostic (auth, organization, business-profile,
-                   business-hours, services-catalog, health)
+                   business-hours, services-catalog, knowledge, receptionist-config, health)
   middleware/     requireAuth, requireOrgMembership — the actual server-side boundaries
                    (see SECURITY.md)
   validation/     zod request-body schemas
@@ -75,12 +75,15 @@ Cross-cutting middleware applied in `app.ts`: `helmet` (security headers), `cors
 redacted — see [SECURITY.md](SECURITY.md)), and a centralized JSON error handler (never leaks
 stack traces to clients).
 
-Routes as of M3: `GET /health` (M1, unauthenticated); `POST /auth/register`, `POST /auth/login`,
+Routes as of M4: `GET /health` (M1, unauthenticated); `POST /auth/register`, `POST /auth/login`,
 `POST /auth/logout`, `GET /auth/me` (M2 — see §9); `POST /organizations`, `GET /organizations`,
 `GET|PATCH /organizations/:organizationId`, `GET|PUT /organizations/:organizationId/business-profile`,
 `GET|PUT /organizations/:organizationId/business-hours`,
 `GET|POST /organizations/:organizationId/services`,
-`PATCH|DELETE /organizations/:organizationId/services/:serviceId` (M3 — see §10).
+`PATCH|DELETE /organizations/:organizationId/services/:serviceId` (M3 — see §10);
+`GET|POST /organizations/:organizationId/knowledge`,
+`PATCH|DELETE /organizations/:organizationId/knowledge/:knowledgeId`,
+`GET|PUT /organizations/:organizationId/receptionist-config` (M4 — see §11).
 
 ## 4. packages/shared
 
@@ -127,9 +130,10 @@ or copied into this repository.
 
 ## 6. Multi-tenancy
 
-**Implemented as of M3** for organizations, business profiles, business hours, and services (see
-§10). Calls, leads, appointments, knowledge, phone numbers, billing, and integrations remain
-future record types that will follow the same pattern established here.
+**Implemented** for organizations, business profiles, business hours, and services (M3, §10), and
+knowledge entries and receptionist configuration (M4, §11). Calls, leads, appointments, phone
+numbers, billing, and integrations remain future record types that will follow the same pattern
+established here.
 
 ### Tenant boundary
 
@@ -140,10 +144,11 @@ company). Every one of the following record types is organization-scoped and mus
 * users — via `organization_memberships` (a join table, not a direct column on `users`; a user
   can in principle belong to multiple organizations, though the M3 frontend only surfaces one)
 * business configuration — `business_profiles`, `business_hours`, `services` (M3, §10)
+* knowledge base entries — `knowledge_entries` (M4, §11)
+* receptionist configuration — `receptionist_configurations` (M4, §11)
 * calls, call transcripts, call summaries — future
 * leads — future
 * appointments — future
-* knowledge base entries — future
 * phone numbers — future
 * integrations (Google Calendar, Twilio config, etc.) — future
 * usage records — future
@@ -201,16 +206,27 @@ See [SECURITY.md](SECURITY.md) for how this fits the broader security posture.
 ## 7. Data layer
 
 **PostgreSQL**: `apps/api` has a real schema — `users`, `sessions` (M2, §9); `organizations`,
-`organization_memberships`, `business_profiles`, `business_hours`, `services` (M3, §10) — via
-Drizzle ORM, with generated SQL migrations in `apps/api/src/db/migrations/`
-(`0000_clever_shiver_man.sql`, `0001_curly_forge.sql`). `services/voice-agent` still does not
-connect to it. **Neither migration has been applied to or tested against a real Postgres
-instance** — Docker is unavailable in this environment (same limitation as M1; see
-[DEPLOYMENT.md](DEPLOYMENT.md)). Application-level logic was instead verified against in-memory
-repository test doubles implementing the same interfaces (§9, §10) — this exercises the real
-business logic and HTTP layer but not Postgres itself, and specifically **not** the real unique
-constraints, foreign keys, or transaction rollback behavior (the in-memory unit-of-work does not
-actually roll back partial writes on failure — see SECURITY.md known limitations).
+`organization_memberships`, `business_profiles`, `business_hours`, `services` (M3, §10);
+`knowledge_entries`, `receptionist_configurations` (M4, §11) — via Drizzle ORM, with generated SQL
+migrations in `apps/api/src/db/migrations/` (`0000_clever_shiver_man.sql`,
+`0001_curly_forge.sql`, `0002_next_lester.sql`). `services/voice-agent` still does not connect to
+it. **No migration has been applied to or tested against a real Postgres instance** — Docker is
+unavailable in this environment (same limitation as M1; see [DEPLOYMENT.md](DEPLOYMENT.md)).
+Application-level logic was instead verified against in-memory repository test doubles
+implementing the same interfaces (§9, §10, §11) — this exercises the real business logic and HTTP
+layer but not Postgres itself, and specifically **not** the real unique constraints, foreign keys,
+or transaction rollback behavior (the in-memory unit-of-work does not actually roll back partial
+writes on failure — see SECURITY.md known limitations).
+
+A local Postgres instance was found listening on `localhost:5432` in the environment this
+milestone was built in (unrelated to this project's Docker setup — `docker` itself remains
+unconfirmed/unavailable via the CLI). It rejected this project's default dev credentials
+(expected — it isn't provisioned for this project). It was not used for verification and no
+attempt was made to configure or connect to it; the honest status remains "Postgres integration is
+untested here." Its presence was discovered incidentally: a test-wiring bug in M4 (a new service
+not injected into `createApp()`'s test double) caused two test suites to silently fall through to
+the real Postgres-backed code path instead of the in-memory one, and the resulting connection
+error (rather than a silent pass) is what surfaced the bug — see TASKS.md.
 
 **Redis**: still not connected to by any service.
 
@@ -346,3 +362,64 @@ business profile, hours, and services server-side (forwarding cookies, same patt
 `apps/web/src/components/organizations/`) with that data as initial props. Every mutation is a
 real `fetch` call to the API with `credentials: 'include'` — none of it is mocked, and none of the
 frontend code makes any authorization decision; it only reflects what the API already decided.
+
+## 11. Knowledge and Receptionist Configuration
+
+M4's goal: make the business's knowledge and AI receptionist configuration persistent, editable,
+and tenant-safe — not to make phone calls. Full test coverage and known limitations live in
+[TASKS.md](TASKS.md)/[SECURITY.md](SECURITY.md); this section covers the design.
+
+**Knowledge** (`apps/api/src/db/schema.ts#knowledgeEntries`): a single flat table — `title`,
+`content`, `category` (`faq | policy | service_info | custom`), `active`, timestamps,
+`organizationId`. Deliberately no document/chunk split and no embeddings column — a future RAG
+milestone adds chunking/embeddings as a **new, additive** table referencing this one's stable
+`id` (e.g. `knowledge_chunks.knowledge_entry_id -> knowledge_entries.id`), not a redesign of it.
+No web crawling / website-derived ingestion (out of scope — this is manual-entry only). Search is
+a simple case-insensitive substring match (`ilike` in Postgres, plain `.includes()` in the
+in-memory test double) against title + content, exposed via `?q=` on the list endpoint — not
+Postgres full-text search, not embeddings, not an external search service.
+
+**Receptionist configuration** (`apps/api/src/db/schema.ts#receptionistConfigurations`): one row
+per organization (`organizationId` itself unique, same pattern as `business_profiles`).
+Provider-agnostic by design — no model name, no voice id, no API key column, nothing naming
+OpenAI/Anthropic/ElevenLabs/Deepgram/Twilio anywhere in the schema. Every field with a sensible
+deterministic default is `NOT NULL` with that default (both at the DB level and set explicitly by
+`createOrganization`) rather than nullable; `callTransferPhone` is the sole exception, since there
+is no reasonable default for a phone number. "Business-hours behavior" is deliberately not a
+separate field — the future voice runtime is expected to combine this config's `greeting` (open
+hours) and `afterHoursMessage` (override) with M3's existing `business_hours` table, rather than
+duplicate the open/closed concept here.
+
+**Auto-seeded at organization creation, always disabled**: `OrganizationService.createOrganization`
+(§10) now also creates a default receptionist configuration inside the same transaction. `enabled`
+is forced to `false` in two independent places — the DB column default, and
+`ReceptionistConfigRepository.create()` explicitly overriding whatever it's passed — so
+organization creation can never activate a receptionist, even if a future caller of `create()`
+tried to pass `enabled: true`.
+
+**Authorization**: identical mechanism to M3 (§10) — no new middleware, no RBAC changes.
+`requireOrgMembership` already generalizes to these two new resource types; every knowledge
+repository method is scoped by `(id, organizationId)` in the same query as `ServiceRepository`
+already was, and the same "404 for non-members, verified via direct repository checks that data is
+unchanged" test pattern is used in `apps/api/tests/knowledge.test.ts` and
+`receptionist-config.test.ts`.
+
+**Future voice-agent contract**: the brief's illustrative
+`get_receptionist_configuration/get_business_profile/get_business_hours/get_services/get_knowledge`
+contract maps directly onto REST endpoints that now all exist:
+`GET /organizations/:organizationId/{receptionist-config,business-profile,business-hours,services,knowledge}`.
+**Decision made, not yet resolved further**: M4 defines this contract by reusing the existing
+user-authenticated endpoints and documenting them here as "the voice-agent contract" — it does
+**not** build a service-to-service authentication mechanism for a future Python voice-agent to
+call these non-interactively. Designing inter-service auth (credential issuance, rotation, scope)
+is real security work that deserves its own deliberate milestone, not a bolt-on here — directly
+analogous to deferring AI-provider credentials rather than implementing an unsafe version now.
+*How* the voice agent will authenticate to call these endpoints is an explicit open question for
+the milestone that actually wires up the voice runtime, tracked in SECURITY.md, not left implicit.
+
+**Frontend**: `KnowledgeManager` and `ReceptionistConfigForm` (client components under
+`apps/web/src/components/knowledge/` and `.../receptionist/`) follow the exact same pattern as
+M3's components — real `fetch` calls with `credentials: 'include'`, loading/saving/saved/error
+states, no mocked data — rendered on the existing `/dashboard` page alongside M3's sections
+(`apps/web/src/lib/organizations.ts` extended with the new types/fetchers, not a new file, to
+match the existing single-file-of-org-scoped-fetchers convention).

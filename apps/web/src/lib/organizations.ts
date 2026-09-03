@@ -44,6 +44,36 @@ export interface ServiceItem {
   updatedAt: string;
 }
 
+export type KnowledgeCategory = "faq" | "policy" | "service_info" | "custom";
+
+export interface KnowledgeEntry {
+  id: string;
+  organizationId: string;
+  title: string;
+  content: string;
+  category: KnowledgeCategory;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReceptionistConfig {
+  id: string;
+  organizationId: string;
+  enabled: boolean;
+  displayName: string;
+  greeting: string;
+  tone: string;
+  instructions: string;
+  fallbackMessage: string;
+  afterHoursMessage: string;
+  callTransferEnabled: boolean;
+  callTransferPhone: string | null;
+  language: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 async function cookieHeader(): Promise<Record<string, string>> {
   const cookieStore = await cookies();
   const header = cookieStore.toString();
@@ -94,4 +124,26 @@ export async function listServices(organizationId: string): Promise<ServiceItem[
   if (!res.ok) return [];
   const data = (await res.json()) as { services: ServiceItem[] };
   return data.services;
+}
+
+export async function listKnowledge(organizationId: string): Promise<KnowledgeEntry[]> {
+  const res = await fetch(`${getApiUrl()}/organizations/${organizationId}/knowledge`, {
+    headers: await cookieHeader(),
+    cache: "no-store",
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { knowledge: KnowledgeEntry[] };
+  return data.knowledge;
+}
+
+export async function getReceptionistConfig(
+  organizationId: string,
+): Promise<ReceptionistConfig | null> {
+  const res = await fetch(`${getApiUrl()}/organizations/${organizationId}/receptionist-config`, {
+    headers: await cookieHeader(),
+    cache: "no-store",
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { receptionistConfig: ReceptionistConfig };
+  return data.receptionistConfig;
 }

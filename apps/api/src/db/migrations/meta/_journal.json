@@ -15,6 +15,13 @@
       "when": 1788466499009,
       "tag": "0001_curly_forge",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788468689367,
+      "tag": "0002_next_lester",
+      "breakpoints": true
     }
   ]
 }

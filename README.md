@@ -5,20 +5,21 @@ conversations, business-specific knowledge, lead capture, appointment booking, S
 human call transfers, call transcripts/summaries, business analytics, usage tracking, and Stripe
 subscriptions.
 
-**Status: M3 — Organizations and business configuration.** None of the product features above
-(calling, AI conversations, leads, appointments, billing, etc.) are implemented yet. This
-repository currently contains the M1 monorepo foundation, M2 authentication (real accounts,
-sessions), and M3 organizations — an authenticated user can create an organization and configure
-its business profile, weekly hours, and a service catalog. See [TASKS.md](TASKS.md) for exactly
-what exists today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full milestone
-sequence (M1–M13).
+**Status: M4 — Business knowledge and AI receptionist configuration.** None of the product
+features above (calling, AI conversations, leads, appointments, billing, etc.) are implemented
+yet. This repository currently contains the M1 monorepo foundation, M2 authentication (real
+accounts, sessions), M3 organizations (business profile, weekly hours, service catalog), and M4
+— an authenticated organization member can manage a knowledge base and configure a
+provider-agnostic AI receptionist (disabled by default; nothing calls a real AI provider yet).
+See [TASKS.md](TASKS.md) for exactly what exists today and
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full milestone sequence (M1–M14).
 
 ## Architecture (high level)
 
 ```
 apps/web            Next.js + TypeScript + Tailwind — customer-facing frontend
 apps/api             Express + TypeScript — backend API
-services/voice-agent  FastAPI (Python) — voice service; Pipecat integration arrives in M4
+services/voice-agent  FastAPI (Python) — voice service; Pipecat integration is a later milestone
 packages/shared       TypeScript types shared by web + api
 infrastructure/docker  docker-compose for local Postgres + Redis
 ```
@@ -40,9 +41,15 @@ tests that attempt exactly that (changing an organization id in a request, spoof
 request body) and confirm they're rejected. Full design and test list:
 [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy)/§10, [SECURITY.md §1](SECURITY.md)/§3.
 
-**Voice infrastructure** will use [Pipecat](https://github.com/pipecat-ai/pipecat) starting at
-M4, added as a normal dependency against the then-current official package/docs — not vendored
-or forked into this repo.
+**Knowledge & receptionist configuration** (M4): a tenant-scoped knowledge base and a
+provider-agnostic AI receptionist configuration (greeting, tone, instructions, enable/disable),
+both real, persistent, and API/UI-editable — with no live AI, phone number, or provider
+integration behind them yet. A default configuration is created (always disabled) alongside every
+new organization. Full design: [ARCHITECTURE.md §11](ARCHITECTURE.md#11-knowledge-and-receptionist-configuration).
+
+**Voice infrastructure** will use [Pipecat](https://github.com/pipecat-ai/pipecat) in a later
+milestone, added as a normal dependency against the then-current official package/docs — not
+vendored or forked into this repo.
 
 ## Prerequisites
 
@@ -96,21 +103,27 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 
 ## Current limitations
 
-* No calls, leads, appointments, knowledge base, phone numbers, or billing — deferred to later
-  milestones by design. Organizations, business profiles, weekly hours, and a service catalog
-  exist as of M3; nothing beyond that.
+* No calls, leads, appointments, phone numbers, or billing — deferred to later milestones by
+  design. Organizations, business profiles, weekly hours, a service catalog, a knowledge base, and
+  receptionist configuration exist as of M4; nothing beyond that.
 * No fine-grained RBAC — any organization member (owner or plain member) currently has full
   read/write access to that organization's configuration. See [SECURITY.md](SECURITY.md).
 * No Twilio, no phone calls, no AI conversation, no STT/TTS/LLM integration, no Stripe, no
-  Google Calendar, no SMS, no RAG/vector database. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
-  for when each lands.
+  Google Calendar, no SMS, no RAG/vector database/embeddings. See
+  [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for when each lands. The receptionist
+  configuration is provider-agnostic and always created disabled — enabling it in the UI does not
+  connect to any AI provider or phone number.
+* No service-to-service authentication yet for a future voice agent to call the knowledge/
+  receptionist-config/business-profile/hours/services endpoints non-interactively — deliberately
+  deferred, see [SECURITY.md](SECURITY.md).
 * No rate limiting / brute-force protection on login or registration, no CSRF token beyond
   `SameSite`, no email verification, no password reset flow, no MFA, no Postgres Row-Level
   Security — see [SECURITY.md](SECURITY.md) for the full list of known gaps.
 * Postgres has a real schema (users, sessions, organizations, memberships, business profiles,
-  hours, services) but **has not been tested against a real database** in this environment —
-  Docker is unavailable here. All logic was verified via in-memory test doubles exercising the
-  same code paths — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication)/§10.
+  hours, services, knowledge entries, receptionist configuration) but **has not been tested
+  against a real database** in this environment — Docker is unavailable here. All logic was
+  verified via in-memory test doubles exercising the same code paths — see
+  [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication)/§10/§11.
 * `services/voice-agent`'s `/health` (and `apps/api`'s `GET /health`) do not check database/Redis
   connectivity.
 * Docker Compose for Postgres/Redis exists but was only validated as syntactically-correct YAML;
@@ -120,7 +133,7 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 
 ## Future milestones
 
-M4 AI voice agent (Pipecat) · M5 Twilio inbound calls · M6 Knowledge base/RAG · M7 Lead capture ·
-M8 Appointment booking · M9 SMS · M10 Dashboard · M11 Stripe billing · M12 Security and testing ·
-M13 Production deployment. Details:
+M5 AI voice agent (Pipecat) · M6 Twilio inbound calls · M7 Knowledge retrieval/RAG · M8 Lead
+capture · M9 Appointment booking · M10 SMS · M11 Dashboard · M12 Stripe billing · M13 Security
+and testing · M14 Production deployment. Details:
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).

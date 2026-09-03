@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type {
+  KnowledgeEntry,
+  KnowledgeRepository,
+  NewKnowledgeEntry,
+} from "../../src/repositories/knowledge-types.js";
+import type {
   BusinessHoursEntry,
   BusinessHoursRepository,
   BusinessProfile,
@@ -15,6 +20,11 @@ import type {
   ServiceItem,
   ServiceRepository,
 } from "../../src/repositories/organization-types.js";
+import type {
+  NewReceptionistConfiguration,
+  ReceptionistConfigRepository,
+  ReceptionistConfiguration,
+} from "../../src/repositories/receptionist-config-types.js";
 import type { OrganizationCreationRepos, UnitOfWork } from "../../src/repositories/unit-of-work.js";
 
 /**
@@ -208,6 +218,112 @@ export function createInMemoryServiceRepository(): ServiceRepository {
       if (!existing || existing.organizationId !== organizationId) return false;
       items.delete(id);
       return true;
+    },
+  };
+}
+
+export function createInMemoryKnowledgeRepository(): KnowledgeRepository {
+  const items = new Map<string, KnowledgeEntry>();
+
+  return {
+    async listByOrganizationId(organizationId, filter) {
+      let results = [...items.values()].filter((e) => e.organizationId === organizationId);
+      if (filter?.category) results = results.filter((e) => e.category === filter.category);
+      if (filter?.active !== undefined) results = results.filter((e) => e.active === filter.active);
+      if (filter?.q) {
+        const needle = filter.q.toLowerCase();
+        results = results.filter(
+          (e) => e.title.toLowerCase().includes(needle) || e.content.toLowerCase().includes(needle),
+        );
+      }
+      return results;
+    },
+    async findByIdAndOrganizationId(id, organizationId) {
+      const item = items.get(id);
+      return item && item.organizationId === organizationId ? item : undefined;
+    },
+    async create(newEntry: NewKnowledgeEntry) {
+      const now = new Date();
+      const entry: KnowledgeEntry = {
+        id: randomUUID(),
+        organizationId: newEntry.organizationId,
+        title: newEntry.title,
+        content: newEntry.content,
+        category: newEntry.category ?? "custom",
+        active: newEntry.active ?? true,
+        createdAt: now,
+        updatedAt: now,
+      };
+      items.set(entry.id, entry);
+      return entry;
+    },
+    async update(id, organizationId, changes) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return undefined;
+      const updated = applyDefined(existing, changes);
+      updated.updatedAt = new Date();
+      items.set(id, updated);
+      return updated;
+    },
+    async deleteByIdAndOrganizationId(id, organizationId) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return false;
+      items.delete(id);
+      return true;
+    },
+  };
+}
+
+const DEFAULT_RECEPTIONIST_CONFIG = {
+  displayName: "AI Receptionist",
+  greeting: "Thank you for calling. How can I help you today?",
+  tone: "friendly and professional",
+  instructions: "",
+  fallbackMessage:
+    "I'm sorry, I don't have that information right now. Let me have someone follow up with you.",
+  afterHoursMessage:
+    "Thanks for calling. We're currently closed — please leave a message and we'll get back to you.",
+  language: "en",
+} as const;
+
+export function createInMemoryReceptionistConfigRepository(): ReceptionistConfigRepository {
+  const configs = new Map<string, ReceptionistConfiguration>();
+
+  return {
+    async findByOrganizationId(organizationId) {
+      return [...configs.values()].find((c) => c.organizationId === organizationId);
+    },
+    async create(newConfig: NewReceptionistConfiguration) {
+      const now = new Date();
+      const config: ReceptionistConfiguration = {
+        id: randomUUID(),
+        organizationId: newConfig.organizationId,
+        // enabled is never taken from the caller, matching the Drizzle
+        // implementation — organization creation must never activate it.
+        enabled: false,
+        displayName: newConfig.displayName ?? DEFAULT_RECEPTIONIST_CONFIG.displayName,
+        greeting: newConfig.greeting ?? DEFAULT_RECEPTIONIST_CONFIG.greeting,
+        tone: newConfig.tone ?? DEFAULT_RECEPTIONIST_CONFIG.tone,
+        instructions: newConfig.instructions ?? DEFAULT_RECEPTIONIST_CONFIG.instructions,
+        fallbackMessage: newConfig.fallbackMessage ?? DEFAULT_RECEPTIONIST_CONFIG.fallbackMessage,
+        afterHoursMessage:
+          newConfig.afterHoursMessage ?? DEFAULT_RECEPTIONIST_CONFIG.afterHoursMessage,
+        callTransferEnabled: false,
+        callTransferPhone: newConfig.callTransferPhone ?? null,
+        language: newConfig.language ?? DEFAULT_RECEPTIONIST_CONFIG.language,
+        createdAt: now,
+        updatedAt: now,
+      };
+      configs.set(config.id, config);
+      return config;
+    },
+    async update(organizationId, changes) {
+      const existing = [...configs.values()].find((c) => c.organizationId === organizationId);
+      if (!existing) return undefined;
+      const updated = applyDefined(existing, changes);
+      updated.updatedAt = new Date();
+      configs.set(existing.id, updated);
+      return updated;
     },
   };
 }

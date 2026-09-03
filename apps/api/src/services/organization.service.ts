@@ -6,6 +6,7 @@ import type {
   OrganizationRepository,
   OrganizationUpdate,
 } from "../repositories/organization-types.js";
+import type { ReceptionistConfiguration } from "../repositories/receptionist-config-types.js";
 import type { UnitOfWork } from "../repositories/unit-of-work.js";
 import { slugify } from "./slugify.js";
 
@@ -13,14 +14,17 @@ export interface CreateOrganizationResult {
   organization: Organization;
   membership: OrganizationMembership;
   businessProfile: BusinessProfile;
+  receptionistConfig: ReceptionistConfiguration;
 }
 
 export interface OrganizationService {
   /**
    * Creates the organization, its owner membership, an initial business
-   * profile, and default (closed) business hours for all 7 days — all in
-   * one transaction. See ARCHITECTURE.md "Organizations": an organization
-   * must never exist without its owner membership.
+   * profile, default (closed) business hours for all 7 days, and a default
+   * receptionist configuration — all in one transaction. See
+   * ARCHITECTURE.md "Organizations": an organization must never exist
+   * without its owner membership. The receptionist configuration is always
+   * created disabled — organization creation must never activate it.
    */
   createOrganization(userId: string, name: string): Promise<CreateOrganizationResult>;
   listOrganizationsForUser(userId: string): Promise<Organization[]>;
@@ -70,8 +74,14 @@ export function createOrganizationService(
           businessName: name,
         });
         await repos.businessHours.replaceAll(organization.id, defaultBusinessHours());
+        // create() itself also forces enabled: false regardless of what's
+        // passed — see drizzle/receptionist-config.repository.ts. Not
+        // relying on that alone here is deliberate belt-and-suspenders.
+        const receptionistConfig = await repos.receptionistConfigs.create({
+          organizationId: organization.id,
+        });
 
-        return { organization, membership, businessProfile };
+        return { organization, membership, businessProfile, receptionistConfig };
       });
     },
 

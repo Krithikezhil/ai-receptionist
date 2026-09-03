@@ -360,6 +360,134 @@ an oversight:
   succession. Not currently a concern at this scale; would matter if abuse potential increases
   (e.g. once billing exists and organization count has cost implications).
 
+## Completed — M4 Business knowledge and AI receptionist configuration
+
+**Planning**
+- [x] Full read-only inspection of M1–M3 code/schema/repositories/services/routes/frontend/tests
+      before any code was written — plan mode used explicitly, per the M4 brief's own instruction
+      not to redesign working architecture without a concrete reason
+- [x] Written plan produced covering schema, endpoints, frontend, authorization, the future
+      voice-agent contract, migration/testing strategy, exact file list, explicit scope
+      boundaries, and 4 flagged architectural decisions — reviewed and approved with adjustments
+      before implementation began
+
+**Data model**
+- [x] `knowledge_entries` (title, content, category `faq|policy|service_info|custom`, active,
+      timestamps, organization_id) — a single flat table, no document/chunk split, no embeddings
+      column; designed so a future RAG milestone adds chunking/embeddings as a new additive table
+      referencing this one's stable id, not a redesign of it
+- [x] `receptionist_configurations` (one per org, `organization_id` itself unique) — fully
+      provider-agnostic (no model/voice/API-key columns anywhere). Per the approved adjustment,
+      every field with a sensible deterministic default is `NOT NULL` with that default rather
+      than nullable; `callTransferPhone` is the sole exception (no reasonable default exists)
+- [x] Migration generated (`0002_next_lester.sql`) and inspected directly — confirmed all
+      `NOT NULL` defaults, including string values containing apostrophes, are correctly
+      SQL-escaped in the generated statement
+
+**Persistence**
+- [x] `KnowledgeRepository`, `ReceptionistConfigRepository` interfaces + Drizzle/Postgres
+      implementations + in-memory test doubles, following the exact `(id, organizationId)`
+      dual-scoping pattern already established for `ServiceRepository`
+- [x] `OrganizationCreationRepos`/`UnitOfWork` extended to also seed a default, disabled
+      receptionist configuration inside the same transaction as org + owner membership + business
+      profile + business hours — `enabled: false` is forced in two independent places (the DB
+      column default, and `ReceptionistConfigRepository.create()` overriding whatever it's passed)
+      so organization creation can never activate a receptionist
+
+**API**
+- [x] `GET/POST /organizations/:organizationId/knowledge`,
+      `PATCH/DELETE /organizations/:organizationId/knowledge/:knowledgeId`,
+      `GET/PUT /organizations/:organizationId/receptionist-config` — added to the existing
+      `organizations.routes.ts` (not new route files), behind the same `requireAuth` +
+      `requireOrgMembership` middleware chain as every M3 endpoint, no new middleware needed
+- [x] Simple case-insensitive substring search (`?q=`) on knowledge title+content via Postgres
+      `ilike`/`or`, with an equivalent in-memory implementation — explicitly not full-text search,
+      not embeddings, not a vector database, per the approved adjustment
+- [x] Two more `exactOptionalPropertyTypes` compiler errors found and fixed properly (widening
+      `KnowledgeListFilter`/`NewKnowledgeEntry` to match zod's inferred shape, the same
+      TypeScript-suggested fix used in M2/M3) — not suppressed
+
+**Frontend**
+- [x] `KnowledgeManager` (list/create/edit-active/delete, category filter, text search) and
+      `ReceptionistConfigForm` (all fields including the `enabled` toggle, with an explicit note
+      that saving does not make the receptionist live) — both real API calls with
+      loading/saving/saved/error states, no mocked data, modeled directly on M3's
+      `ServicesManager`/`BusinessProfileForm`
+- [x] `apps/web/src/lib/organizations.ts` extended (not a new file) with the two new types and
+      fetchers, matching the established single-file convention
+- [x] Dashboard page extended to fetch and render both new sections alongside M3's three
+
+**Tenant isolation tests — the most safety-critical part of this milestone**
+- [x] `apps/api/tests/knowledge.test.ts` (13 tests) and `receptionist-config.test.ts` (7 tests):
+      unauthenticated rejected; non-member cannot list/read/modify/delete another org's knowledge
+      or read/modify another org's receptionist config (all 404, all verified unchanged via direct
+      repository checks afterward — including a specific attempt to flip a victim org's `enabled`
+      to `true`, rejected exactly like any other cross-tenant write); changing the organization id
+      in the request path cannot bypass authorization; a spoofed `organizationId` in a knowledge
+      POST body cannot orphan the entry into another organization; organization creation seeds
+      exactly one receptionist config, always disabled, with the documented deterministic
+      defaults; the config API response contains no vendor/provider-shaped keys
+- [x] `organizations.test.ts`'s existing org-creation test extended (not duplicated) to also
+      assert the seeded receptionist config, via both the HTTP response and a direct repository
+      read
+- [x] `registerAgent`/`createOrg` test helpers extracted from `organizations.test.ts` into a new
+      shared `tests/support/http-helpers.ts` rather than duplicated a third time — a minor,
+      non-behavioral refactor applied because three near-identical copies would have been the
+      actual monolithic-file problem the project's own conventions warn against
+- [x] **A real bug was caught, not glossed over**: `build-test-app.ts` initially built the
+      in-memory `knowledge`/`receptionistConfigs` repositories but never constructed services from
+      them or passed those services into `createApp()`'s deps — so `createApp()` silently fell
+      back to its Postgres-backed defaults for those two resources. All 13 new tests failed with
+      real `DrizzleQueryError`/`password authentication failed` errors against a local, unrelated
+      Postgres instance that happens to be listening on `localhost:5432` in this environment (not
+      this project's Docker setup, not used for anything). Fixed by explicitly constructing and
+      injecting `knowledgeService`/`receptionistConfigService`, with a comment added warning that
+      any future resource type must be wired the same way or it silently escapes the test double.
+- [x] 54/54 total tests passing (34 from M2/M3 unchanged + 13 knowledge + 7 receptionist-config)
+
+**Documentation**
+- [x] ARCHITECTURE.md §11 (Knowledge and Receptionist Configuration) added; §§2, 3, 6, 7 updated;
+      the stale "M2 — Authentication" status header (missed in the M3 doc pass) corrected to M4
+- [x] SECURITY.md §1, §3 (new M4 tenant-isolation scenarios), §5, §6, §7 updated — including the
+      inter-service-auth deferral and knowledge-search-stays-simple decisions as explicit known
+      gaps, not left implicit
+- [x] README.md, IMPLEMENTATION_PLAN.md updated; M1–M3 content left alone
+
+**Verification actually run**
+- [x] `npm run typecheck -w apps/api` / `-w apps/web` — clean at every phase, not accumulated
+- [x] `npm run lint -w apps/api` / `-w apps/web` — clean
+- [x] `npm run test -w apps/api` — 54/54 passing (after finding and fixing the wiring bug above)
+- [x] `npm run build -w apps/web` (`next build`) — succeeded
+- [x] Root aggregate `npm run lint`/`typecheck`/`test`/`build` — full-repo regression, all green
+- [x] `services/voice-agent` Python checks re-run — unaffected, still passing
+- [x] `git diff`/`git status` inspected; secret scan run over the diff
+
+## Remaining M4 work
+
+None identified as blocking M4's stated scope. Explicitly out of scope by the brief itself:
+
+- [ ] Service-to-service authentication for the future voice agent to call the contract endpoints
+      non-interactively — deliberately deferred to the milestone that wires up the voice runtime.
+- [ ] Full-text/vector search, embeddings, RAG — explicitly excluded; the schema is shaped so
+      these can be added additively later (see ARCHITECTURE.md §11).
+- [ ] Web crawling / website-derived knowledge ingestion — not implemented, not attempted.
+- [ ] Applying `0002_next_lester.sql` to a real Postgres instance — blocked on Docker being
+      unavailable in this environment, not on missing code.
+
+## Known limitations (M4 additions)
+
+- **Postgres-specific behavior remains unverified** for the two new tables, same caveat as M3's
+  tables (constraints, cascades, transaction rollback only exercised via in-memory doubles).
+- **No inter-service authentication mechanism** — the voice-agent contract endpoints currently
+  require a real user session; there is no way for a backend service to call them yet. See
+  SECURITY.md §7.
+- **No RBAC beyond membership** — unchanged from M3, now also covering knowledge and receptionist
+  configuration.
+- **Knowledge search is substring-only** — no full-text index, no relevance ranking.
+- **Receptionist configuration has no audit trail** — updates overwrite in place; no history of
+  who changed what when. Not required by the M4 brief; worth considering once multiple members
+  can edit the same organization's configuration.
+
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M4 through M13.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M5 through M14.

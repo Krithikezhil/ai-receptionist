@@ -151,3 +151,71 @@ export const services = pgTable("services", {
 
 export type ServiceRow = typeof services.$inferSelect;
 export type NewServiceRow = typeof services.$inferInsert;
+
+/**
+ * M4: business knowledge the future AI receptionist will draw on. A single
+ * flat table — no document/chunk split, no embeddings, no vector column.
+ * `id` (stable UUID) and `content` (full text) are deliberately the only
+ * things a future RAG milestone would need: chunking/embeddings belong in a
+ * new, additive table referencing this one (e.g.
+ * `knowledge_chunks.knowledge_entry_id -> knowledge_entries.id`), not a
+ * redesign of it. See ARCHITECTURE.md "Knowledge".
+ */
+export const knowledgeEntries = pgTable("knowledge_entries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  content: text("content").notNull(),
+  category: text("category", { enum: ["faq", "policy", "service_info", "custom"] })
+    .notNull()
+    .default("custom"),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type KnowledgeEntryRow = typeof knowledgeEntries.$inferSelect;
+export type NewKnowledgeEntryRow = typeof knowledgeEntries.$inferInsert;
+
+/**
+ * M4: one provider-agnostic receptionist configuration per organization
+ * (organizationId itself unique, same pattern as business_profiles). No
+ * vendor-specific fields (no model name, no voice id, no API key column).
+ * Every field with a sensible deterministic default is NOT NULL with that
+ * default, rather than nullable — the exception is callTransferPhone, which
+ * has no reasonable default. `enabled` defaults false: organization
+ * creation must never activate the receptionist (see
+ * services/organization.service.ts).
+ */
+export const receptionistConfigurations = pgTable("receptionist_configurations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .unique()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  displayName: text("display_name").notNull().default("AI Receptionist"),
+  greeting: text("greeting").notNull().default("Thank you for calling. How can I help you today?"),
+  tone: text("tone").notNull().default("friendly and professional"),
+  instructions: text("instructions").notNull().default(""),
+  fallbackMessage: text("fallback_message")
+    .notNull()
+    .default(
+      "I'm sorry, I don't have that information right now. Let me have someone follow up with you.",
+    ),
+  afterHoursMessage: text("after_hours_message")
+    .notNull()
+    .default(
+      "Thanks for calling. We're currently closed — please leave a message and we'll get back to you.",
+    ),
+  callTransferEnabled: boolean("call_transfer_enabled").notNull().default(false),
+  callTransferPhone: text("call_transfer_phone"), // no sensible default — nullable is correct
+  language: text("language").notNull().default("en"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ReceptionistConfigurationRow = typeof receptionistConfigurations.$inferSelect;
+export type NewReceptionistConfigurationRow = typeof receptionistConfigurations.$inferInsert;

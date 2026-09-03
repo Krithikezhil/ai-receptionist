@@ -1,8 +1,10 @@
-import { createApp } from "../../src/app.js";
+import { createApp, type AppDependencies } from "../../src/app.js";
 import { createAuthService } from "../../src/services/auth.service.js";
 import { createBusinessHoursService } from "../../src/services/business-hours.service.js";
 import { createBusinessProfileService } from "../../src/services/business-profile.service.js";
+import { createKnowledgeService } from "../../src/services/knowledge.service.js";
 import { createOrganizationService } from "../../src/services/organization.service.js";
+import { createReceptionistConfigService } from "../../src/services/receptionist-config.service.js";
 import { createServicesCatalogService } from "../../src/services/services-catalog.service.js";
 import {
   createInMemorySessionRepository,
@@ -11,7 +13,9 @@ import {
 import {
   createInMemoryBusinessHoursRepository,
   createInMemoryBusinessProfileRepository,
+  createInMemoryKnowledgeRepository,
   createInMemoryOrganizationRepositories,
+  createInMemoryReceptionistConfigRepository,
   createInMemoryServiceRepository,
   createInMemoryUnitOfWork,
 } from "./in-memory-organization-repositories.js";
@@ -22,6 +26,16 @@ import {
  * (hashing, session validation, tenant-membership checks) are exercised
  * end-to-end without needing a live database. See ARCHITECTURE.md
  * "Authentication" / "Organizations" for the test strategy this implements.
+ *
+ * Structural safeguard: `deps` below is typed as `Required<AppDependencies>`,
+ * not `AppDependencies`. createApp() silently falls back to a real
+ * Postgres-backed service for anything not explicitly injected — without
+ * this, omitting one here wouldn't fail loudly, it would just mean that
+ * resource's tests quietly exercise production wiring instead of the test
+ * double (exactly what happened when knowledge/receptionist-config were
+ * added — see TASKS.md). With `Required<...>`, adding a new optional field
+ * to `AppDependencies` without wiring it here is now a `tsc` compile error
+ * ("Property 'x' is missing"), not a silent runtime fallback.
  */
 export function buildTestApp() {
   const users = createInMemoryUserRepository();
@@ -32,26 +46,35 @@ export function buildTestApp() {
   const businessProfiles = createInMemoryBusinessProfileRepository();
   const businessHours = createInMemoryBusinessHoursRepository();
   const services = createInMemoryServiceRepository();
+  const knowledge = createInMemoryKnowledgeRepository();
+  const receptionistConfigs = createInMemoryReceptionistConfigRepository();
   const unitOfWork = createInMemoryUnitOfWork({
     organizations,
     memberships,
     businessProfiles,
     businessHours,
+    receptionistConfigs,
   });
 
   const organizationService = createOrganizationService(unitOfWork, organizations);
   const businessProfileService = createBusinessProfileService(businessProfiles);
   const businessHoursService = createBusinessHoursService(businessHours);
   const servicesCatalogService = createServicesCatalogService(services);
+  const knowledgeService = createKnowledgeService(knowledge);
+  const receptionistConfigService = createReceptionistConfigService(receptionistConfigs);
 
-  const app = createApp({
+  const deps: Required<AppDependencies> = {
     authService,
     memberships,
     organizationService,
     businessProfileService,
     businessHoursService,
     servicesCatalogService,
-  });
+    knowledgeService,
+    receptionistConfigService,
+  };
+
+  const app = createApp(deps);
 
   return {
     app,
@@ -62,5 +85,7 @@ export function buildTestApp() {
     businessProfiles,
     businessHours,
     services,
+    knowledge,
+    receptionistConfigs,
   };
 }

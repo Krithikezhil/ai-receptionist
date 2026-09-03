@@ -16,10 +16,15 @@ import {
   createBusinessProfileService,
   type BusinessProfileService,
 } from "./services/business-profile.service.js";
+import { createKnowledgeService, type KnowledgeService } from "./services/knowledge.service.js";
 import {
   createOrganizationService,
   type OrganizationService,
 } from "./services/organization.service.js";
+import {
+  createReceptionistConfigService,
+  type ReceptionistConfigService,
+} from "./services/receptionist-config.service.js";
 import {
   createServicesCatalogService,
   type ServicesCatalogService,
@@ -33,6 +38,8 @@ export interface AppDependencies {
   businessProfileService?: BusinessProfileService;
   businessHoursService?: BusinessHoursService;
   servicesCatalogService?: ServicesCatalogService;
+  knowledgeService?: KnowledgeService;
+  receptionistConfigService?: ReceptionistConfigService;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
@@ -48,6 +55,9 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.businessHoursService ?? createBusinessHoursService(repos.businessHours);
   const servicesCatalogService =
     deps.servicesCatalogService ?? createServicesCatalogService(repos.services);
+  const knowledgeService = deps.knowledgeService ?? createKnowledgeService(repos.knowledge);
+  const receptionistConfigService =
+    deps.receptionistConfigService ?? createReceptionistConfigService(repos.receptionistConfigs);
 
   const app = express();
 
@@ -64,6 +74,8 @@ export function createApp(deps: AppDependencies = {}): Express {
       businessProfileService,
       businessHoursService,
       servicesCatalogService,
+      knowledgeService,
+      receptionistConfigService,
     }),
   );
 

@@ -1,19 +1,20 @@
 # Security
 
-Status: **M3 — Organizations and business configuration**, building on M1/M2. This document
-covers (a) the multi-tenant isolation strategy and what actually enforces it as of M3, (b) the
+Status: **M4 — Business knowledge and AI receptionist configuration**, building on M1–M3. This
+document covers (a) the multi-tenant isolation strategy and what actually enforces it, (b) the
 authentication/session security design, and (c) the security posture of what actually exists
-today. Full security hardening/testing is milestone **M12** in
+today. Full security hardening/testing is milestone **M13** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps growing with each milestone
-that adds real attack surface (payment handling in M11, etc.).
+that adds real attack surface (payment handling in M12, etc.).
 
 ## 1. Multi-tenant isolation
 
-Full detail and rationale live in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy) and §10.
-Binding rules, and their implementation status as of M3:
+Full detail and rationale live in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-tenancy), §10, and
+§11. Binding rules, and their implementation status:
 
 * Tenant = organization. Every org-scoped table gets a non-nullable, indexed `organization_id`.
-  **Implemented** for `business_profiles`, `business_hours`, `services`.
+  **Implemented** for `business_profiles`, `business_hours`, `services`, `knowledge_entries`,
+  `receptionist_configurations`.
 * **The frontend is never the isolation boundary.** UI-level filtering is a UX convenience only;
   it must never be the only thing preventing cross-tenant access. **Implemented and tested** — see
   §3.
@@ -135,12 +136,13 @@ security boundary — for auth or for tenant access.**
 
 ## 3. Tenant isolation testing
 
-This is the most safety-critical part of M3, so it gets its own section rather than being folded
-into §1. `apps/api/tests/organizations.test.ts` exercises the **real HTTP layer** (Supertest
-against the full Express app, including both `requireAuth` and `requireOrgMembership`
-middleware) — not the service layer in isolation, so the tests prove what an actual attacker
-would experience, not just what the code is intended to do. Verified scenarios, each an
-automated, passing test:
+This is the most safety-critical part of M3/M4, so it gets its own section rather than being
+folded into §1. `apps/api/tests/organizations.test.ts` (M3), `knowledge.test.ts`, and
+`receptionist-config.test.ts` (M4) all exercise the **real HTTP layer** (Supertest against the
+full Express app, including both `requireAuth` and `requireOrgMembership` middleware) — not the
+service layer in isolation, so the tests prove what an actual attacker would experience, not just
+what the code is intended to do. Verified scenarios in `organizations.test.ts`, each an automated,
+passing test:
 
 1. An unauthenticated request to an organization endpoint is rejected (401).
 2. An authenticated user can access an organization they created (200).
@@ -171,6 +173,28 @@ profile, business hours (including rejecting a hours payload missing a day), and
 (create/update/delete), plus a check that `GET /organizations` only ever lists organizations the
 caller actually belongs to.
 
+**M4 additions** (`knowledge.test.ts`, `receptionist-config.test.ts`), the exact same isolation
+requirements applied to the two new resource types, all passing:
+
+* Unauthenticated access to either resource type is rejected (401).
+* A non-member cannot list, read, modify, or delete another organization's knowledge entries
+  (404 on every verb), confirmed unchanged via direct repository checks afterward.
+* A non-member cannot read or modify another organization's receptionist configuration (404),
+  confirmed the target config's `enabled`/`displayName` are unchanged afterward — specifically
+  including an attempt to flip `enabled: true` on a victim organization's configuration, which is
+  rejected exactly like any other cross-tenant write.
+* Changing the organization id in the request path cannot bypass authorization for either
+  resource type.
+* A spoofed `organizationId` in a knowledge-creation request body cannot orphan the entry into
+  another organization — verified the created entry belongs to the URL's organization and does
+  not appear in the victim organization's list.
+* Organization creation seeds exactly one receptionist configuration, and it is always `enabled:
+  false` with the documented deterministic defaults (`displayName: "AI Receptionist"`, etc.) —
+  checked via both the creation response and a direct repository read.
+* The receptionist-config response body contains no vendor/provider-shaped keys (`provider`,
+  `apiKey`, `model`) — a lightweight assertion that the provider-agnostic design constraint is
+  actually reflected in what the API returns, not just in the schema.
+
 ## 4. Secrets and environment variables
 
 * No `.env` file exists in this repository and none was created during setup — only
@@ -193,19 +217,25 @@ Being explicit about what exists so this section stays honest rather than aspira
 
 * `apps/api`: `GET /health` (no auth). Auth endpoints (`POST /auth/register|login|logout`,
   `GET /auth/me`) — see §2. Organization endpoints (`POST/GET /organizations`,
-  `GET/PATCH /organizations/:organizationId`, business-profile/business-hours/services
-  sub-resources) — all require authentication, and all but creation/listing additionally require
-  verified membership. `helmet` applies baseline security headers; `cors` restricts browser
-  callers to `WEB_ORIGIN` with `credentials: true`.
-* `services/voice-agent` exposes exactly one route, `GET /health`, no auth.
-* `apps/web` serves `/`, `/login`, `/register`, and `/dashboard` (real organization creation and
-  business-profile/hours/services configuration UI — no mocked data, no fake product features).
-  No payment forms, no PII collection beyond email/password/business contact info.
+  `GET/PATCH /organizations/:organizationId`, business-profile/business-hours/services/knowledge/
+  receptionist-config sub-resources) — all require authentication, and all but creation/listing
+  additionally require verified membership. `helmet` applies baseline security headers; `cors`
+  restricts browser callers to `WEB_ORIGIN` with `credentials: true`.
+* `services/voice-agent` exposes exactly one route, `GET /health`, no auth. It does not call any
+  of the M4 organization endpoints yet — the "future voice-agent contract" (ARCHITECTURE.md §11)
+  is documented but not wired up to this service.
+* `apps/web` serves `/`, `/login`, `/register`, and `/dashboard` (real organization creation,
+  business-profile/hours/services configuration, knowledge-base management, and receptionist
+  configuration UI — no mocked data, no fake product features). No payment forms, no PII
+  collection beyond email/password/business contact info.
 * Postgres has a real schema (`users`, `sessions`, `organizations`, `organization_memberships`,
-  `business_profiles`, `business_hours`, `services`) but **has not been connected to in this
-  environment** (Docker unavailable) — see [DEPLOYMENT.md](DEPLOYMENT.md) and
+  `business_profiles`, `business_hours`, `services`, `knowledge_entries`,
+  `receptionist_configurations`) but **has not been connected to in this environment** (Docker
+  unavailable) — see [DEPLOYMENT.md](DEPLOYMENT.md) and
   [ARCHITECTURE.md §7](ARCHITECTURE.md#7-data-layer).
-* No third-party API keys are used by any code path yet.
+* No third-party API keys are used by any code path yet. The receptionist configuration schema is
+  deliberately provider-agnostic (no model/voice/API-key columns) — verified by an automated test
+  asserting the API response contains no such keys, not just by reviewing the schema.
 
 ## 6. Dependencies
 
@@ -220,9 +250,10 @@ Being explicit about what exists so this section stays honest rather than aspira
   newer `drizzle-kit` release fixes this yet. Tracked as a known limitation, not a runtime issue.
 * `argon2` (ranisalt/node-argon2) confirmed actively maintained and installs cleanly on this
   Windows dev machine via prebuilt binaries.
-* No new runtime dependencies were added in M3 (organizations/business-config uses the same
+* No new runtime dependencies were added in M3 or M4 (knowledge/receptionist-config uses the same
   Drizzle/zod/Express stack already in place from M1/M2) — deliberately, per the "avoid
-  unnecessary dependencies" instruction.
+  unnecessary dependencies" instruction. No search library, no vector database client, no
+  embeddings SDK.
 
 ## 7. Known gaps (expected at this stage — see TASKS.md)
 
@@ -230,26 +261,39 @@ Being explicit about what exists so this section stays honest rather than aspira
   significant near-term hardening item, now joined by the M3 mutating endpoints as additional
   surface that would benefit from it.
 * **No CSRF token** beyond `SameSite=Lax` — M3 adds real mutating endpoints, raising the value of
-  this hardening item for M12.
+  this hardening item for M13.
 * **No PostgreSQL Row-Level Security** — application-layer scoping (`requireOrgMembership` +
   per-query `organizationId` filtering) is the only enforcement currently in place. RLS would be a
   genuine defense-in-depth addition, not a currently-missing requirement (the application-layer
   checks are independently tested and sufficient on their own).
 * **No email verification, no password reset flow, no MFA.**
 * **No fine-grained RBAC** — any membership (`owner` or `member`) currently grants full read/write
-  access to that organization's profile/hours/services. The `role` column exists for a future
-  milestone to use; M3 deliberately doesn't build on it yet (explicitly out of scope per the M3
-  brief).
+  access to that organization's profile/hours/services/knowledge/receptionist-config. The `role`
+  column exists for a future milestone to use; M3/M4 deliberately don't build on it yet
+  (explicitly out of scope per both briefs) — unchanged from M3, not a new gap introduced by M4.
+* **No service-to-service authentication for the future voice agent** — the M4 "voice-agent
+  contract" (ARCHITECTURE.md §11) is a set of REST endpoints that reuse the existing
+  user-authenticated `requireAuth`/`requireOrgMembership` middleware. There is currently no way
+  for a non-interactive backend service (the future Python voice runtime) to call them without a
+  real user session. Deliberately deferred, not an oversight — designing credential
+  issuance/rotation/scope for inter-service auth is real security work for the milestone that
+  actually wires up the voice runtime, not a bolt-on here.
+* **Knowledge search is a simple substring match only** — no Postgres full-text search
+  (`tsvector`), no embeddings, no vector database, no external search service. Sufficient at this
+  scale; explicitly not a step toward RAG (see ARCHITECTURE.md §11 on how a future RAG milestone
+  would extend the schema additively instead).
 * **No CI-enforced security scanning** (`npm audit`, `pip-audit`, secret scanning) — planned for
-  M12.
+  M13.
 * **No dependency-update automation** (Dependabot/Renovate) configured yet.
 * **Postgres integration is untested against a real database** — Docker unavailable in this
-  environment; verified instead via in-memory repository test doubles exercising the same
-  interfaces (see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication) / §10). Specifically
-  unverified: the real unique constraints (`slug`, `(organization_id, user_id)`,
-  `(organization_id, day_of_week)`), the real foreign-key cascade deletes, and real transaction
-  rollback behavior for organization creation (the in-memory `UnitOfWork` does not actually roll
-  back partial writes on failure, unlike the Postgres implementation's real `db.transaction()`).
+  environment (a local, unrelated Postgres instance was found listening on `localhost:5432` and
+  was deliberately not used — see ARCHITECTURE.md §7); verified instead via in-memory repository
+  test doubles exercising the same interfaces (see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-authentication)
+  / §10 / §11). Specifically unverified: the real unique constraints (`slug`,
+  `(organization_id, user_id)`, `(organization_id, day_of_week)`), the real foreign-key cascade
+  deletes, and real transaction rollback behavior for organization creation (the in-memory
+  `UnitOfWork` does not actually roll back partial writes on failure, unlike the Postgres
+  implementation's real `db.transaction()`).
 * **Slug collision handling has a theoretical race condition**: concurrent creation of two
   organizations with the same name could both pass the in-application collision check before
   either commits. The database's unique constraint on `slug` is the real backstop, but a race
