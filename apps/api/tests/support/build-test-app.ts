@@ -15,6 +15,7 @@ import {
   createInMemoryBusinessProfileRepository,
   createInMemoryKnowledgeRepository,
   createInMemoryOrganizationRepositories,
+  createInMemoryOrganizationServiceCredentialRepository,
   createInMemoryReceptionistConfigRepository,
   createInMemoryServiceRepository,
   createInMemoryUnitOfWork,
@@ -37,6 +38,16 @@ import {
  * to `AppDependencies` without wiring it here is now a `tsc` compile error
  * ("Property 'x' is missing"), not a silent runtime fallback.
  */
+
+/**
+ * Fixed test value for the service-auth key — tests never read a real
+ * INTERNAL_SERVICE_KEY env var. Exported so tests can build a matching
+ * `Authorization: Bearer` header without duplicating this literal (see
+ * tests/internal-api.test.ts).
+ */
+export const TEST_INTERNAL_SERVICE_KEY =
+  "test-internal-service-key-0123456789abcdef0123456789abcdef";
+
 export function buildTestApp() {
   const users = createInMemoryUserRepository();
   const sessions = createInMemorySessionRepository();
@@ -48,12 +59,14 @@ export function buildTestApp() {
   const services = createInMemoryServiceRepository();
   const knowledge = createInMemoryKnowledgeRepository();
   const receptionistConfigs = createInMemoryReceptionistConfigRepository();
+  const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
   const unitOfWork = createInMemoryUnitOfWork({
     organizations,
     memberships,
     businessProfiles,
     businessHours,
     receptionistConfigs,
+    organizationServiceCredentials,
   });
 
   const organizationService = createOrganizationService(unitOfWork, organizations);
@@ -72,6 +85,8 @@ export function buildTestApp() {
     servicesCatalogService,
     knowledgeService,
     receptionistConfigService,
+    internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
+    organizationServiceCredentials,
   };
 
   const app = createApp(deps);
@@ -87,5 +102,6 @@ export function buildTestApp() {
     services,
     knowledge,
     receptionistConfigs,
+    organizationServiceCredentials,
   };
 }

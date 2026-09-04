@@ -1,8 +1,9 @@
 import { createApp } from "./app.js";
-import { assertAuthSecret, env } from "./config/env.js";
+import { assertAuthSecret, assertServiceAuthSecret, env } from "./config/env.js";
 import { logger } from "./config/logger.js";
 
 assertAuthSecret();
+assertServiceAuthSecret();
 
 const app = createApp();
 

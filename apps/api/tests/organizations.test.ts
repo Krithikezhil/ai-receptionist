@@ -40,12 +40,21 @@ describe("POST /organizations (creation)", () => {
       enabled: false,
       displayName: "AI Receptionist",
     });
+    // M5: a per-organization internal-API service credential is seeded too,
+    // returned exactly once, here — see internal-api.test.ts for the full
+    // issuance/storage and cross-tenant-denial coverage.
+    expect(typeof res.body.serviceCredential?.token).toBe("string");
+    expect(res.body.serviceCredential.token.length).toBeGreaterThanOrEqual(32);
 
     // Verify directly against the repository too, not just the HTTP response.
     const membership = await ctx.memberships.findByOrgAndUser(res.body.organization.id, userId);
     expect(membership?.role).toBe("owner");
     const config = await ctx.receptionistConfigs.findByOrganizationId(res.body.organization.id);
     expect(config?.enabled).toBe(false);
+    const credential = await ctx.organizationServiceCredentials.findByOrganizationId(
+      res.body.organization.id,
+    );
+    expect(credential?.tokenHash).not.toBe(res.body.serviceCredential.token);
   });
 
   it("rejects invalid organization creation input", async () => {

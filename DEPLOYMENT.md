@@ -1,7 +1,7 @@
 # Deployment
 
-Status: **M4 — Business knowledge and AI receptionist configuration. Nothing in this repository
-is deployed anywhere.** Production deployment is milestone **M14** in
+Status: **M5 — Voice/AI runtime foundation. Nothing in this repository is deployed anywhere.**
+Production deployment is milestone **M14** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This document currently covers local
 development only, plus the Docker/Postgres limitation for this environment.
 

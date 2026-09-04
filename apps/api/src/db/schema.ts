@@ -219,3 +219,25 @@ export const receptionistConfigurations = pgTable("receptionist_configurations",
 
 export type ReceptionistConfigurationRow = typeof receptionistConfigurations.$inferSelect;
 export type NewReceptionistConfigurationRow = typeof receptionistConfigurations.$inferInsert;
+
+/**
+ * M5: the fact that authorizes /internal/v1/organizations/:id/* for one
+ * specific organization. Only a SHA-256 hash of the token is ever stored
+ * (same discipline as `sessions.id` — see src/auth/session.ts) — a leaked
+ * row cannot be used to authenticate. One per organization, generated
+ * exactly once inside the organization-creation transaction; the raw token
+ * is returned to the caller only in that one response and never persisted
+ * or logged. See src/middleware/require-organization-service-token.ts and
+ * ARCHITECTURE.md "Internal voice API".
+ */
+export const organizationServiceCredentials = pgTable("organization_service_credentials", {
+  organizationId: uuid("organization_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type OrganizationServiceCredentialRow = typeof organizationServiceCredentials.$inferSelect;
+export type NewOrganizationServiceCredentialRow =
+  typeof organizationServiceCredentials.$inferInsert;

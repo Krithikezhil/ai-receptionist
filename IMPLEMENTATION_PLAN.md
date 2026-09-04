@@ -46,14 +46,23 @@ from, reusing the existing user-authenticated tenant-isolation model rather than
 inter-service auth prematurely. No live calling, no LLM/STT/TTS/provider integration — see
 SECURITY.md known gaps for what's explicitly deferred.
 
-## M5 — AI voice agent
+## M5 — Voice/AI runtime foundation ✅ complete
 
-Integrates Pipecat (current official package, current official docs — not vendored/forked) into
-`services/voice-agent`. LLM integration (OpenAI), STT (Deepgram), TTS (Cartesia and/or
-ElevenLabs). Consumes the M4 contract (business profile/hours/services/knowledge/receptionist
-config) — which requires designing the inter-service authentication mechanism M4 deliberately
-deferred. Voice conversations are not connected to real phone calls yet in this milestone —
-that's M6.
+Integrated Pipecat (`pipecat-ai`, current official package/docs — not vendored/forked) into
+`services/voice-agent`, with a transport-agnostic pipeline and a thin provider-selection layer
+over Pipecat's own `STTService`/`LLMService`/`TTSService` (Deepgram/OpenAI/Cartesia, each lazily
+imported, each with a deterministic fake as the default so CI never needs real provider
+credentials). Designed and built the inter-service authentication mechanism M4 deliberately
+deferred: a static bearer-token `INTERNAL_SERVICE_KEY`, a new `/internal/v1/...` router on
+`apps/api` consuming the exact M4 contract (business profile/hours/services/knowledge/receptionist
+config, aggregated into one `runtime-context` call), and one read-only function-calling tool
+(`search_knowledge`). See ARCHITECTURE.md §12 and SECURITY.md §8 for the full design.
+
+Voice conversations are **not** connected to real phone calls in this milestone — no Twilio, no
+PSTN, no phone numbers, no SIP, no production WebRTC infrastructure. The only transport ever
+instantiated is Pipecat's `SmallWebRTCTransport`, and only in a manual, non-CI, local smoke-test
+entry point (`bot.py`) — real phone connectivity is M6, and the pipeline was deliberately built
+transport-agnostic so M6 only needs to add a Twilio transport, not touch pipeline logic.
 
 ## M6 — Twilio inbound calls
 

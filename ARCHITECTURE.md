@@ -1,9 +1,9 @@
 # Architecture
 
-Status: **M4 — Business knowledge and AI receptionist configuration**, building on M1–M3. This
-document describes the structure established so far and the design intent for pieces that don't
-exist as code yet (marked explicitly). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for
-the milestone sequence.
+Status: **M5 — Voice/AI runtime foundation**, building on M1–M4. This document describes the
+structure established so far and the design intent for pieces that don't exist as code yet
+(marked explicitly). See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the milestone
+sequence.
 
 ## 1. Monorepo layout
 
@@ -75,7 +75,7 @@ Cross-cutting middleware applied in `app.ts`: `helmet` (security headers), `cors
 redacted — see [SECURITY.md](SECURITY.md)), and a centralized JSON error handler (never leaks
 stack traces to clients).
 
-Routes as of M4: `GET /health` (M1, unauthenticated); `POST /auth/register`, `POST /auth/login`,
+Routes as of M5: `GET /health` (M1, unauthenticated); `POST /auth/register`, `POST /auth/login`,
 `POST /auth/logout`, `GET /auth/me` (M2 — see §9); `POST /organizations`, `GET /organizations`,
 `GET|PATCH /organizations/:organizationId`, `GET|PUT /organizations/:organizationId/business-profile`,
 `GET|PUT /organizations/:organizationId/business-hours`,
@@ -83,7 +83,9 @@ Routes as of M4: `GET /health` (M1, unauthenticated); `POST /auth/register`, `PO
 `PATCH|DELETE /organizations/:organizationId/services/:serviceId` (M3 — see §10);
 `GET|POST /organizations/:organizationId/knowledge`,
 `PATCH|DELETE /organizations/:organizationId/knowledge/:knowledgeId`,
-`GET|PUT /organizations/:organizationId/receptionist-config` (M4 — see §11).
+`GET|PUT /organizations/:organizationId/receptionist-config` (M4 — see §11);
+`GET /internal/v1/organizations/:organizationId/runtime-context`,
+`GET /internal/v1/organizations/:organizationId/knowledge` (M5, service-authenticated — see §12).
 
 ## 4. packages/shared
 
@@ -102,15 +104,20 @@ model any real entity yet, since none exist in M1.
 
 ## 5. services/voice-agent — Voice service
 
-FastAPI, Python 3.12, managed by [uv](https://docs.astral.sh/uv/). Structure mirrors
-`apps/api`'s route/controller-equivalent/service split:
+FastAPI, Python 3.12, managed by [uv](https://docs.astral.sh/uv/). Structure as of M5:
 
 ```
 src/voice_agent/
-  config.py       environment settings
-  routes/         FastAPI routers (URL -> handler wiring)
-  services/        business logic, framework-agnostic
-  main.py          FastAPI app factory (create_app) + process entrypoint
+  config.py       environment settings (incl. INTERNAL_SERVICE_KEY, provider selection)
+  routes/         FastAPI routers (URL -> handler wiring) — GET /health only, still
+  services/       business logic, framework-agnostic (health)
+  clients/        typed HTTP client for apps/api's /internal/v1/* (api_client.py, models.py)
+  providers/      STT/LLM/TTS provider factory + fake/no-op doubles (§12)
+  tools/          read-only function-calling tools (search_knowledge.py, §12)
+  runtime/        turns a fetched RuntimeContext into the LLM system prompt (context.py)
+  pipeline.py     transport-agnostic bot pipeline construction (§12)
+  bot.py          manual/local SmallWebRTCTransport smoke-test entry point — NOT in CI
+  main.py         FastAPI app factory (create_app) + process entrypoint
 ```
 
 **Python version**: pinned to 3.12 (`requires-python = ">=3.12,<3.13"`, `.python-version`),
@@ -121,12 +128,11 @@ Python ecosystem this service will pull in from M4 onward — packages in that s
 its provider integrations, audio libraries) typically support the last 2-3 CPython minors first,
 and 3.14 is too new to assume broad compatibility yet.
 
-**Pipecat is explicitly not installed or referenced in M1.** This service currently only proves
-out the project skeleton and a real, working health endpoint (`GET /health`, checked live during
-verification — see [TASKS.md](TASKS.md)). When the voice-agent milestone (M4) begins, Pipecat
-will be added as a normal dependency via `uv add pipecat-ai` (or the current official package
-name at that time) against whatever the official docs specify then — **not** vendored, forked,
-or copied into this repository.
+**Pipecat is a normal dependency as of M5** (`pipecat-ai>=1.8.1,<1.9.0`, pinned to a narrow range
+since its frame/context APIs have already had breaking changes — e.g. the `LLMContext`/
+`FunctionCallParams` model replacing an older OpenAI-specific context class), added via
+`uv add "pipecat-ai[cartesia,deepgram,openai]"` against the current official docs — **not**
+vendored, forked, or copied into this repository. See §12 for the full integration design.
 
 ## 6. Multi-tenancy
 
@@ -245,7 +251,9 @@ is documented ahead of time — see [SECURITY.md](SECURITY.md) for handling rule
 
 As of M2, `AUTH_SECRET` is the first variable that's actually required: `apps/api` calls
 `assertAuthSecret()` at startup (`server.ts`, before `app.listen`) and refuses to start without
-it, rather than silently hashing passwords with an insecure default.
+it, rather than silently hashing passwords with an insecure default. As of M5,
+`INTERNAL_SERVICE_KEY` is the second — `assertServiceAuthSecret()` follows the identical
+fail-closed pattern (see §12).
 
 ## 9. Authentication
 
@@ -404,18 +412,11 @@ already was, and the same "404 for non-members, verified via direct repository c
 unchanged" test pattern is used in `apps/api/tests/knowledge.test.ts` and
 `receptionist-config.test.ts`.
 
-**Future voice-agent contract**: the brief's illustrative
-`get_receptionist_configuration/get_business_profile/get_business_hours/get_services/get_knowledge`
-contract maps directly onto REST endpoints that now all exist:
-`GET /organizations/:organizationId/{receptionist-config,business-profile,business-hours,services,knowledge}`.
-**Decision made, not yet resolved further**: M4 defines this contract by reusing the existing
-user-authenticated endpoints and documenting them here as "the voice-agent contract" — it does
-**not** build a service-to-service authentication mechanism for a future Python voice-agent to
-call these non-interactively. Designing inter-service auth (credential issuance, rotation, scope)
-is real security work that deserves its own deliberate milestone, not a bolt-on here — directly
-analogous to deferring AI-provider credentials rather than implementing an unsafe version now.
-*How* the voice agent will authenticate to call these endpoints is an explicit open question for
-the milestone that actually wires up the voice runtime, tracked in SECURITY.md, not left implicit.
+**Voice-agent contract, resolved in M5**: M4 originally defined this contract by reusing the
+existing user-authenticated `/organizations/...` endpoints and deliberately deferred designing
+service-to-service authentication to "the milestone that wires up the voice runtime." That
+milestone is M5 — see §12 for the resulting `/internal/v1/...` surface, its authentication
+design, and why it's a separate router rather than a branch on `requireAuth`/`requireOrgMembership`.
 
 **Frontend**: `KnowledgeManager` and `ReceptionistConfigForm` (client components under
 `apps/web/src/components/knowledge/` and `.../receptionist/`) follow the exact same pattern as
@@ -423,3 +424,228 @@ M3's components — real `fetch` calls with `credentials: 'include'`, loading/sa
 states, no mocked data — rendered on the existing `/dashboard` page alongside M3's sections
 (`apps/web/src/lib/organizations.ts` extended with the new types/fetchers, not a new file, to
 match the existing single-file-of-org-scoped-fetchers convention).
+
+## 12. Voice/AI Runtime Foundation (M5)
+
+M5's goal: give the Python voice-agent a secure way to read a tenant's configuration/knowledge,
+and give it a Pipecat-based conversational pipeline built on that data — **not** to place or
+receive a real phone call. No Twilio, no PSTN, no phone numbers, no SMS anywhere in this
+milestone; that is M6. Full test coverage and known limitations live in
+[TASKS.md](TASKS.md)/[SECURITY.md](SECURITY.md); this section covers the design.
+
+### 12.1 Internal voice API
+
+A new router, `GET /internal/v1/organizations/:organizationId/{runtime-context,knowledge}`
+(`apps/api/src/routes/internal.routes.ts`), mounted alongside — not inside — the existing
+`/organizations/...` router. `/v1` is the **first use of API versioning in this project**,
+justified because this is now a contract between two independently-deployable,
+independently-releasable services (unlike `apps/web`, which always ships against the
+same-release-train API); a future breaking change gets `/v2` alongside `/v1`, not a silent break.
+
+* `GET .../runtime-context` — aggregates receptionist config + business profile + business hours
+  + services into one response (`RuntimeContext`, defined once in
+  `packages/shared/src/voice-runtime.ts` as the canonical wire shape, consumed on the Python side
+  by hand-written mirror models in `services/voice-agent/src/voice_agent/clients/models.py` since
+  Python can't import a TS package). Fetched once per session at connection start — everything in
+  it is small and bounded, so there is no need for a live tool/round-trip for any of it.
+* `GET .../knowledge` — identical filter semantics (`category`, `active`, `q`) to the public
+  knowledge endpoint, deliberately kept separate and on-demand rather than folded into
+  runtime-context, since knowledge can grow arbitrarily large and needs live querying mid-call
+  (this is the one thing exposed as a tool to the LLM — see §12.5).
+
+Both handlers reuse the exact same M2–M4 services (`organizationService`, `receptionistConfigService`,
+`businessProfileService`, `businessHoursService`, `servicesCatalogService`, `knowledgeService`) —
+no new repository or business logic was added for M5, only a new controller/route layer with a
+different auth mechanism and an aggregated response shape.
+
+### 12.2 Service-to-service authentication
+
+**Credential type**: a single static, long, random, opaque bearer token (not a JWT — no
+claims/issuer/expiry machinery is needed for one caller; not mTLS/OAuth2 client-credentials —
+real security work that pays off with multiple internal services, credential rotation, and scoped
+grants, none of which apply yet with exactly one internal caller and no Docker/infra available in
+this environment to run a token-issuing service anyway). Sent as a standard
+`Authorization: Bearer <token>` header — deliberately the standard header name so it's already
+covered by `config/logger.ts`'s existing `req.headers.authorization` redaction, with zero logger
+changes needed.
+
+**Generation**: a one-time manual operator step (`openssl rand -hex 32`), not generated by
+application code at runtime — documented as a setup step in `README.md`.
+
+**Storage**: the environment variable `INTERNAL_SERVICE_KEY`, identically valued on both
+`apps/api` and `services/voice-agent`. Never in Postgres, never committed to source control — same
+class of value as `AUTH_SECRET`.
+
+**Validation**: `apps/api/src/middleware/require-service-auth.ts` extracts the bearer token and
+compares it to `env.internalServiceKey` with `crypto.timingSafeEqual`, **after an explicit
+length check** — `timingSafeEqual` throws on a length mismatch instead of returning `false`, so a
+wrong-length key must be rejected before ever calling it, not left to crash into the generic error
+handler. This is the first use of `timingSafeEqual` in the codebase — justified because, unlike
+the hashed session token (looked up by equality inside Postgres), this key is compared directly
+in Node application code against a fixed value on every request, so a naive `===` could leak
+timing information about how many leading bytes matched.
+
+**Scope: this key alone is not tenant-scoped.** It only proves "trusted internal service" — it
+says nothing about which organization a request may touch. What actually authorizes a specific
+`:organizationId` is a second, independent credential: `X-Organization-Service-Token`.
+
+**Per-organization credential (`X-Organization-Service-Token`)**: generated once per
+organization, inside the same transaction as organization creation
+(`src/auth/organization-service-token.ts#generateOrganizationServiceToken`,
+`crypto.randomBytes(32).toString("hex")`). Only its SHA-256 hash is persisted, in
+`organization_service_credentials.token_hash` — the same hashed-credential discipline as
+session tokens (`sessions.id`); `organization_id` is that table's PRIMARY KEY, so exactly one
+credential exists per organization at the database level. The raw token is returned to the
+caller exactly once, in `POST /organizations`'s response body, and never persisted in
+plaintext, logged, or returned by any other endpoint.
+
+`apps/api/src/middleware/require-organization-service-token.ts`, mounted after
+`requireServiceAuth`, looks up the stored hash for the URL's `:organizationId`, hashes the
+presented `X-Organization-Service-Token`, and compares it with the same `safeCompare()`
+constant-time helper `require-service-auth.ts` exports. **This — not the global key — is what
+establishes which organization a request is authorized for**: a token issued for organization A
+is checked only against organization A's stored hash, so presenting it against any other
+organization's URL fails (403), every time. A request with a valid global key but a missing,
+wrong, or wrong-length organization token is rejected (403) before touching any organization
+data; a request naming an organization id with no credential row at all — impossible for any
+organization created through the normal flow, since creation always seeds one — is rejected
+(404). No automated rotation/reissue exists for a leaked organization token in M5; recovering
+from one currently requires a direct database update — deferred, not an oversight (see
+SECURITY.md §8.2).
+
+**Rotation/revocation**: manual only — an operator generates a new value, updates the env var on
+both services, and restarts both. Because it's a single compared value (not a list), rotation
+causes a brief availability gap unless both services are updated in the same window; there is no
+dual-key grace-period support in M5. Documented as a known, deliberate limitation.
+
+**Unauthorized behavior**: missing header, wrong scheme (non-`Bearer`), or a mismatched key all
+produce the same `401 { "error": "Not authenticated." }` — no distinction is leaked between "no
+credential" and "wrong credential."
+
+**Why a separate router, not a branch on `requireAuth`/`requireOrgMembership`**: those middleware
+exist specifically to verify a *user's* session and a *user's* membership row — a service
+credential has neither. Forcing it through that path would mean special-casing every call site;
+one small, honestly-named `requireServiceAuth` middleware mounted on its own router is more
+honest about what's actually being checked. `createApp()` fails safe rather than throwing if no
+key is configured at all: it falls back to a random per-boot value (`crypto.randomBytes(32)`)
+rather than either crashing every caller of `createApp()` (breaking, e.g., the M1 health test,
+which never touches `/internal/v1`) or accepting a predictable default — an unset key means
+`/internal/v1` is simply unreachable, not that it accepts anything. Real production startup is
+still fail-closed via `assertServiceAuthSecret()` in `server.ts`, which runs before `createApp()`
+and refuses to start the process at all if `INTERNAL_SERVICE_KEY` is unset or too short.
+
+### 12.3 Tenant scoping on the internal API
+
+No membership concept applies to a service credential, so `/internal/v1/...` does not use
+`requireOrgMembership` — tenant scoping is `requireOrganizationServiceToken` (§12.2), mounted
+after `requireServiceAuth` on every route. `organizationId` is always taken from the URL path,
+never trusted from a body; a request 404s if no organization (and therefore no credential row)
+exists for that id, and 403s if one exists but the presented `X-Organization-Service-Token`
+doesn't match its stored hash — reusing the same non-enumeration convention as the public API
+for the 404 case. An explicit regression test suite (`apps/api/tests/internal-api.test.ts`)
+proves: the two auth mechanisms are mutually exclusive (a valid service bearer token does not
+authorize `/organizations/...`, and a valid session cookie does not authorize
+`/internal/v1/...`); an organization's own token authorizes its own `runtime-context`/
+`knowledge` (200); a *different* organization's token against the same URL is rejected (403),
+including after freshly creating a third organization to rule out any incidental id-ordering
+effect; a missing, wrong, or wrong-length organization token is rejected (403); a nonexistent
+organization id is rejected (404); and a disabled receptionist configuration still returns
+`200` with `enabled: false` — the API's job is to report state accurately, not to gate on it;
+the voice-agent is expected to check `enabled` itself before starting a session.
+
+### 12.4 Pipecat integration
+
+`pipecat-ai` is a normal dependency (§5) — application code is limited to: the provider
+factory/fakes (§12.5), the one tool (§12.6), pipeline *wiring*
+(`services/voice-agent/src/voice_agent/pipeline.py` — composing Pipecat's building blocks with
+chosen services and the tool), and the internal-API client that feeds the pipeline its context.
+Everything else — STT/LLM/TTS execution, frame routing (`Frame`/`FrameProcessor`/`Pipeline`),
+interruption handling, function-calling plumbing (`LLMContext`, `FunctionCallParams`,
+`register_function`/`run_function_calls`), and transport implementations — is Pipecat's framework
+code, used as-is.
+
+**Transport-agnostic by construction**: `pipeline.py`'s `build_pipeline()` takes any Pipecat
+`BaseTransport` and contains zero telephony-specific code — it never imports a
+Twilio/Telnyx/Plivo-related class. The only transport instantiated anywhere in M5 is
+`SmallWebRTCTransport`, and that instantiation is confined entirely to `bot.py` (a manual,
+non-CI, local smoke-test entry point using Pipecat's own official development runner,
+`pipecat.runner.run` + `create_transport()`'s factory-dict pattern, rather than hand-rolled WebRTC
+signaling) — `pipeline.py` itself never references it. A future M6 Twilio transport is a new
+entry in that factory dict plus a new runner-args type; `pipeline.py` does not change.
+
+**Session/runtime state is ephemeral**: a session is one `Pipeline` instance built per
+connection — `runtime-context` is fetched once at session start, folded into the LLM's system
+prompt (`runtime/context.py`), and everything else (conversation history, tool-call state) lives
+only in that pipeline instance's process memory for the connection's lifetime. Nothing is
+persisted; there is no session table. This means the prompt can go stale if the underlying config
+changes mid-call — an accepted, documented limitation given M5's short-lived, foundation-only
+scope, not an oversight.
+
+### 12.5 Provider abstraction (STT/LLM/TTS)
+
+No custom STT/LLM/TTS interface was built — Pipecat's own `STTService`/`LLMService`/`TTSService`
+base classes already are that abstraction (swapping vendors means instantiating a different
+Pipecat-provided subclass, not writing a new interface). Application code adds exactly one thin
+layer, `providers/factory.py`: env vars `STT_PROVIDER`/`LLM_PROVIDER`/`TTS_PROVIDER` select either
+a real Pipecat provider class (`DeepgramSTTService`, `OpenAILLMService`, `CartesiaTTSService` —
+each imported lazily, only when actually selected, so the module never requires every provider
+SDK to be installed) or a deterministic fake (`providers/fakes.py`) satisfying the same base
+class. **`"fake"` is the default for every role** — the service boots and every automated test
+passes with zero provider credentials configured; a real provider additionally requires its
+matching API key env var (`_require_env()`, a clear `ProviderConfigurationError` if missing —
+fails closed, not silently unauthenticated).
+
+Provider choice is a voice-agent **deployment** concern (an env var), not a per-tenant database
+field — a direct, intentional continuation of §11's "provider-agnostic, no vendor/model/API-key
+columns" decision on `receptionist_configurations`.
+
+The fakes (`FakeSTTService`, `FakeTTSService`, `FakeLLMService`) genuinely subclass Pipecat's real
+base classes rather than a hand-rolled substitute, so pipeline construction and tests exercise the
+same code path a real provider would. `FakeLLMService` in particular overrides `process_frame`
+(not just `_process_context`) to actually trigger inference on `LLMContextFrame` — mirroring what
+`BaseOpenAILLMService.process_frame` does — and, when a configurable trigger phrase is present in
+the last user message, calls Pipecat's real `run_function_calls()` to invoke the registered
+`search_knowledge` handler, so `tests/test_pipeline.py` proves genuine integration with Pipecat's
+function-calling machinery, not a bypass (verified by asserting the mocked internal API was
+actually called and its real response flows through to a `FunctionCallResultFrame`).
+
+### 12.6 Tools
+
+Exactly one read-only, dynamic function-calling tool for M5:
+`search_knowledge(query, category?)` (`tools/search_knowledge.py`), calling the internal
+`GET /internal/v1/organizations/:id/knowledge` endpoint. Its handler is embedded directly on a
+`FunctionSchema` (Pipecat auto-registers a schema's embedded handler wherever it's advertised in
+an `LLMContext`, so no separate `register_function` call is needed), and never raises on failure —
+an API error is delivered as a structured `{"error": ...}` result via the normal result callback,
+so a failed lookup degrades the conversation rather than crashing the session.
+
+Business profile, hours, services, and the receptionist config are **not** tools — they're
+prefetched once via `runtime-context` (§12.1) and folded into the system prompt, since they're
+small and bounded and don't need live querying. Hours/services-as-tools are explicitly deferred
+(easy to add later if a catalog grows large enough that prefetching stops being practical), and no
+write-capable tool exists — no booking, no lead capture, no CRM writes, per the milestone
+boundary.
+
+### 12.7 Testing strategy
+
+Same "real logic tested via doubles, real infra reserved for manual verification" philosophy
+M1–M4 already established (`build-test-app.ts` on the Node side), extended to the voice-agent:
+
+* **Node** (`apps/api/tests/internal-api.test.ts`, Supertest against the full app with in-memory
+  repos): auth-required, cross-auth isolation, correct aggregation, 404-for-nonexistent-org — see
+  §12.3.
+* **Python** (`pytest` + `pytest-asyncio`, zero network, zero real credentials):
+  `test_providers.py` (factory selection + fail-closed-without-API-key paths),
+  `test_api_client.py` (`respx`/`httpx.MockTransport`-mocked HTTP: success, 401, 404,
+  unreachable-server), `test_search_knowledge_tool.py` (handler logic in isolation),
+  `test_build_pipeline.py` (structural: `build_pipeline()` accepts a minimal fake `BaseTransport`
+  and returns a `Pipeline`), and `test_pipeline.py` (behavioral: uses Pipecat's own
+  `pipecat.tests.utils.run_test` — the officially supported way to test a `FrameProcessor`'s frame
+  flow — to run `FakeLLMService` for real and prove the tool genuinely executes).
+* **Manual only, never CI**: running the real pipeline over `SmallWebRTCTransport`
+  (`bot.py` + Pipecat's development runner) with real provider keys configured, to literally talk
+  to the bot in a browser. Documented in `services/voice-agent/README.md` as a developer-only
+  workflow.
+
+No test requires Postgres, Docker, a real STT/LLM/TTS provider, a microphone, a browser, a
+WebSocket, or a phone call.

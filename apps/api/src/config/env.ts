@@ -33,6 +33,12 @@ export const env = {
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "ai_receptionist_session",
   sessionTtlDays: Number.parseInt(process.env.SESSION_TTL_DAYS ?? "30", 10),
   cookieSecure: readNodeEnv() === "production",
+
+  // A genuine secret shared with services/voice-agent (see
+  // middleware/require-service-auth.ts) so that non-interactive backend
+  // service can call /internal/v1/* without a browser session cookie.
+  // Deliberately has NO code-level default, same reasoning as authSecret.
+  internalServiceKey: process.env.INTERNAL_SERVICE_KEY,
 };
 
 /**
@@ -45,6 +51,21 @@ export function assertAuthSecret(): void {
     throw new Error(
       "AUTH_SECRET is not set (or is too short). Set a random secret of at least 16 " +
         "characters, e.g. via `openssl rand -base64 32`. See .env.example.",
+    );
+  }
+}
+
+/**
+ * Fails closed for the service-to-service auth boundary the same way
+ * assertAuthSecret() does for user auth: refuse to start rather than let
+ * /internal/v1/* silently accept an empty/short key. See
+ * middleware/require-service-auth.ts and SECURITY.md.
+ */
+export function assertServiceAuthSecret(): void {
+  if (!env.internalServiceKey || env.internalServiceKey.length < 32) {
+    throw new Error(
+      "INTERNAL_SERVICE_KEY is not set (or is too short). Set a random secret of at least 32 " +
+        "characters, e.g. via `openssl rand -hex 32`. See .env.example.",
     );
   }
 }

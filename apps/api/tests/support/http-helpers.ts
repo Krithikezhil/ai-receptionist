@@ -19,5 +19,7 @@ export async function createOrg(agent: ReturnType<typeof request.agent>, name: s
     membership: { role: string; userId: string; organizationId: string };
     businessProfile: { id: string; organizationId: string; businessName: string };
     receptionistConfig: { id: string; organizationId: string; enabled: boolean };
+    /** Raw per-organization internal-API token — shown only in this response. */
+    serviceCredential: { token: string };
   };
 }

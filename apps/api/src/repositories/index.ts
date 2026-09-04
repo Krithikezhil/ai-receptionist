@@ -3,6 +3,7 @@ import { createDrizzleBusinessHoursRepository } from "./drizzle/business-hours.r
 import { createDrizzleBusinessProfileRepository } from "./drizzle/business-profile.repository.js";
 import { createDrizzleKnowledgeRepository } from "./drizzle/knowledge.repository.js";
 import { createDrizzleMembershipRepository } from "./drizzle/membership.repository.js";
+import { createDrizzleOrganizationServiceCredentialRepository } from "./drizzle/organization-service-credential.repository.js";
 import { createDrizzleOrganizationRepository } from "./drizzle/organization.repository.js";
 import { createDrizzleReceptionistConfigRepository } from "./drizzle/receptionist-config.repository.js";
 import { createDrizzleServiceRepository } from "./drizzle/service.repository.js";
@@ -10,6 +11,7 @@ import { createDrizzleSessionRepository } from "./drizzle/session.repository.js"
 import { createDrizzleUnitOfWork } from "./drizzle/unit-of-work.js";
 import { createDrizzleUserRepository } from "./drizzle/user.repository.js";
 import type { KnowledgeRepository } from "./knowledge-types.js";
+import type { OrganizationServiceCredentialRepository } from "./organization-service-credential-types.js";
 import type {
   BusinessHoursRepository,
   BusinessProfileRepository,
@@ -31,6 +33,7 @@ export interface Repositories {
   services: ServiceRepository;
   knowledge: KnowledgeRepository;
   receptionistConfigs: ReceptionistConfigRepository;
+  organizationServiceCredentials: OrganizationServiceCredentialRepository;
   unitOfWork: UnitOfWork;
 }
 
@@ -46,6 +49,7 @@ export function createRepositories(): Repositories {
     services: createDrizzleServiceRepository(db),
     knowledge: createDrizzleKnowledgeRepository(db),
     receptionistConfigs: createDrizzleReceptionistConfigRepository(db),
+    organizationServiceCredentials: createDrizzleOrganizationServiceCredentialRepository(db),
     unitOfWork: createDrizzleUnitOfWork(db),
   };
 }
@@ -59,5 +63,6 @@ export type {
   ServiceRepository,
 } from "./organization-types.js";
 export type { KnowledgeRepository } from "./knowledge-types.js";
+export type { OrganizationServiceCredentialRepository } from "./organization-service-credential-types.js";
 export type { ReceptionistConfigRepository } from "./receptionist-config-types.js";
 export type { UnitOfWork } from "./unit-of-work.js";

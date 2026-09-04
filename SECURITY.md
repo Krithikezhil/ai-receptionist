@@ -1,9 +1,9 @@
 # Security
 
-Status: **M4 — Business knowledge and AI receptionist configuration**, building on M1–M3. This
-document covers (a) the multi-tenant isolation strategy and what actually enforces it, (b) the
-authentication/session security design, and (c) the security posture of what actually exists
-today. Full security hardening/testing is milestone **M13** in
+Status: **M5 — Voice/AI runtime foundation**, building on M1–M4. This document covers (a) the
+multi-tenant isolation strategy and what actually enforces it, (b) the authentication/session
+security design, (c) the M5 service-to-service authentication design (§8), and (d) the security
+posture of what actually exists today. Full security hardening/testing is milestone **M13** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps growing with each milestone
 that adds real attack surface (payment handling in M12, etc.).
 
@@ -33,6 +33,14 @@ Full detail and rationale live in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-multi-
 * Duplicate memberships for the same `(organization, user)` pair are rejected (unique constraint
   in the migration; the in-memory test double mirrors the same behavior since Postgres itself is
   unverified — see §6). **Implemented and tested.**
+* **M5 addition**: `/internal/v1/...` (the service-to-service voice API) uses a two-stage
+  service-to-service trust model, not membership-based: `INTERNAL_SERVICE_KEY` establishes that
+  the caller is a trusted internal service at all, and a separate, per-organization
+  `X-Organization-Service-Token` establishes which specific organization that request is
+  authorized for — re-verified against a stored hash on every request, the same "never trust the
+  id merely because it's present" pattern `requireOrgMembership` uses above, just keyed by a
+  token hash instead of a membership row. A token issued for one organization is rejected (403)
+  for any other. See §8.
 
 ## 2. Authentication and session security
 
@@ -195,6 +203,34 @@ requirements applied to the two new resource types, all passing:
   `apiKey`, `model`) — a lightweight assertion that the provider-agnostic design constraint is
   actually reflected in what the API returns, not just in the schema.
 
+**M5 additions** (`apps/api/tests/internal-api.test.ts`), all passing, covering both the global
+service-auth boundary and the per-organization tenant-authorization boundary:
+
+* Valid global service credential + that organization's own `X-Organization-Service-Token` + a
+  real organization → 200 with that organization's own data.
+* A token issued for organization A does **not** authorize organization B: presenting
+  organization A's `X-Organization-Service-Token` against organization B's URL → 403, even with
+  a valid global key — verified for both `runtime-context` and `knowledge`, and again after
+  freshly creating a third organization, confirming organization A's token authorizes only its
+  own id.
+* Missing organization context (no `:organizationId` path segment) → 404 (no route match).
+* A nonexistent organization id → 404, for both `runtime-context` and `knowledge`.
+* A disabled receptionist configuration → still 200 with `enabled: false` in the payload — the API
+  reports state accurately rather than gating on it; the voice-agent is expected to check `enabled`
+  itself before starting a session.
+* An invalid, missing, wrong-scheme, or wrong-length global service credential → 401 in every
+  case, including a dedicated test that a wrong-*length* key hits the explicit length-guard path
+  rather than crashing `crypto.timingSafeEqual` into the generic 500 handler.
+* A missing, wrong, or wrong-length `X-Organization-Service-Token` (with a valid global key) →
+  403 in every case, via the same explicit length-guard pattern.
+* Cross-auth isolation: a valid service bearer token does not authorize `/organizations/...`, and a
+  valid session cookie does not authorize `/internal/v1/...` — the two mechanisms are proven
+  mutually exclusive, not just independently correct.
+* Credential issuance/storage: the raw organization token is returned exactly once, at
+  organization-creation time; only its SHA-256 hash is ever persisted; and neither the token nor
+  the hash appears in any other response (`GET`/list organizations, the public
+  receptionist-config endpoint, or the internal runtime-context response itself).
+
 ## 4. Secrets and environment variables
 
 * No `.env` file exists in this repository and none was created during setup — only
@@ -206,10 +242,17 @@ requirements applied to the two new resource types, all passing:
   `req.headers.cookie` from all log output. No code path logs environment variables, request
   bodies, or passwords wholesale — pino-http's default request serializer logs method/url/headers
   only, never the body.
-* `AUTH_SECRET` is the only genuinely required secret (see §2) — required at startup, no
-  code-level default, generation instructions in `.env.example`.
-* Placeholder variables for not-yet-built integrations (Stripe, Twilio, OpenAI, Deepgram,
-  Cartesia, ElevenLabs, Google) remain in `.env.example` as empty values.
+* `AUTH_SECRET` and, as of M5, `INTERNAL_SERVICE_KEY` (see §8) are the two genuinely required
+  secrets — both required at startup, neither has a code-level default, both have generation
+  instructions in `.env.example`.
+* `INTERNAL_SERVICE_KEY` is sent as a standard `Authorization: Bearer` header specifically so it's
+  covered by the existing `req.headers.authorization` pino redaction with zero logger changes —
+  see §8.
+* Placeholder variables for not-yet-built integrations (Stripe, Twilio, Google) remain in
+  `.env.example` as empty values. OpenAI/Deepgram/Cartesia/ElevenLabs keys are also still
+  placeholders — M5 built the *abstraction* for real provider wiring (§8's cross-referenced
+  ARCHITECTURE.md §12.5), but no automated test or CI step ever supplies a real key or makes a live
+  call to any of them.
 
 ## 5. Current attack surface
 
@@ -221,9 +264,13 @@ Being explicit about what exists so this section stays honest rather than aspira
   receptionist-config sub-resources) — all require authentication, and all but creation/listing
   additionally require verified membership. `helmet` applies baseline security headers; `cors`
   restricts browser callers to `WEB_ORIGIN` with `credentials: true`.
-* `services/voice-agent` exposes exactly one route, `GET /health`, no auth. It does not call any
-  of the M4 organization endpoints yet — the "future voice-agent contract" (ARCHITECTURE.md §11)
-  is documented but not wired up to this service.
+* `services/voice-agent` exposes exactly one HTTP route, `GET /health`, no auth (unchanged from
+  M1 — no new public routes were added by M5). It now calls `apps/api`'s `/internal/v1/...`
+  endpoints (service-authenticated — see §8) via `clients/api_client.py`, and has a Pipecat
+  pipeline (`pipeline.py`) that is constructed per-session, not exposed as an HTTP endpoint of its
+  own. The only way to actually run a session in M5 is the manual, non-CI `bot.py` entry point
+  (real STT/LLM/TTS provider keys required to be meaningful; the default "fake" providers make it
+  inert) — there is still no way to reach the voice-agent from outside the local machine.
 * `apps/web` serves `/`, `/login`, `/register`, and `/dashboard` (real organization creation,
   business-profile/hours/services configuration, knowledge-base management, and receptionist
   configuration UI — no mocked data, no fake product features). No payment forms, no PII
@@ -254,6 +301,14 @@ Being explicit about what exists so this section stays honest rather than aspira
   Drizzle/zod/Express stack already in place from M1/M2) — deliberately, per the "avoid
   unnecessary dependencies" instruction. No search library, no vector database client, no
   embeddings SDK.
+* **M5** adds `pipecat-ai` (pinned `>=1.8.1,<1.9.0` — its frame/context APIs have already had
+  breaking changes across versions, e.g. the `LLMContext`/`FunctionCallParams` model replacing an
+  older OpenAI-specific context class, so an open version range would be unsafe) with only the
+  `cartesia`/`deepgram`/`openai` extras actually referenced by the provider factory, plus `httpx`
+  (promoted from dev to a runtime dependency for the internal-API client). Dev-only additions:
+  `pytest-asyncio`, `respx` (HTTP mocking for tests), `pipecat-ai-small-webrtc-prebuilt` (browser
+  client for the manual, non-CI smoke test only). No dependency was added to `apps/api` for M5 —
+  the internal router reuses existing Express/zod/crypto (Node built-in) machinery.
 
 ## 7. Known gaps (expected at this stage — see TASKS.md)
 
@@ -271,13 +326,20 @@ Being explicit about what exists so this section stays honest rather than aspira
   access to that organization's profile/hours/services/knowledge/receptionist-config. The `role`
   column exists for a future milestone to use; M3/M4 deliberately don't build on it yet
   (explicitly out of scope per both briefs) — unchanged from M3, not a new gap introduced by M4.
-* **No service-to-service authentication for the future voice agent** — the M4 "voice-agent
-  contract" (ARCHITECTURE.md §11) is a set of REST endpoints that reuse the existing
-  user-authenticated `requireAuth`/`requireOrgMembership` middleware. There is currently no way
-  for a non-interactive backend service (the future Python voice runtime) to call them without a
-  real user session. Deliberately deferred, not an oversight — designing credential
-  issuance/rotation/scope for inter-service auth is real security work for the milestone that
-  actually wires up the voice runtime, not a bolt-on here.
+* ~~No service-to-service authentication for the future voice agent~~ — **resolved in M5**, see
+  §8. What remains open, carried forward as new/updated gaps below:
+* **Neither M5 service credential (`INTERNAL_SERVICE_KEY` nor a per-organization
+  `X-Organization-Service-Token`) has automated rotation.** Rotating the global key requires a
+  manual, coordinated restart of both services. A leaked organization token is worse: M5 has no
+  reissue/rotation endpoint for it at all, so recovering from a leaked one currently requires a
+  direct database update. Deliberately accepted for this foundation milestone (§8); a self-service
+  rotation/reissue endpoint is deferred until a real rotation requirement exists.
+* **No rate limiting on `/internal/v1/...`** either — same pre-existing, already-documented gap as
+  `/auth/*`, not newly introduced by M5.
+* **Pipecat/provider dependency surface is new and largely unexercised against real providers** —
+  automated tests only ever run against fakes (ARCHITECTURE.md §12.5); real OpenAI/Deepgram/
+  Cartesia wiring has not been security-reviewed or load-tested, since M5's definition of done is
+  the abstraction plus optional lazy real-provider wiring, not a live provider integration.
 * **Knowledge search is a simple substring match only** — no Postgres full-text search
   (`tsvector`), no embeddings, no vector database, no external search service. Sufficient at this
   scale; explicitly not a step toward RAG (see ARCHITECTURE.md §11 on how a future RAG milestone
@@ -299,3 +361,98 @@ Being explicit about what exists so this section stays honest rather than aspira
   either commits. The database's unique constraint on `slug` is the real backstop, but a race
   would currently surface as a 500 rather than a graceful retry. Not fixed in M3 (acceptable at
   current scale); worth revisiting if organization creation becomes high-throughput.
+
+## 8. Service-to-service authentication (M5)
+
+Design rationale lives in [ARCHITECTURE.md §12.2](ARCHITECTURE.md#122-service-to-service-authentication).
+This section is the authoritative security summary.
+
+M5 uses **two independent credentials, checked in sequence**; neither alone establishes tenant
+authorization:
+
+1. `INTERNAL_SERVICE_KEY` — a single, global, static credential proving the caller is a trusted
+   internal service at all (`apps/api/src/middleware/require-service-auth.ts`).
+2. `X-Organization-Service-Token` — a separate, per-organization credential proving the request
+   is authorized for the *specific* `:organizationId` in the URL
+   (`apps/api/src/middleware/require-organization-service-token.ts`).
+
+### 8.1 Global credential (`INTERNAL_SERVICE_KEY`)
+
+* **Format**: a single static, long (32-byte / 256-bit), random, opaque bearer token — not a
+  JWT, not mTLS, not OAuth2 client-credentials. Sent as `Authorization: Bearer <token>`.
+* **Generation**: a one-time manual operator step (`openssl rand -hex 32`), never generated by
+  application code at runtime.
+* **Storage**: the `INTERNAL_SERVICE_KEY` environment variable, identically valued on both
+  `apps/api` and `services/voice-agent`. Same handling as `AUTH_SECRET` — never in Postgres,
+  never committed, no code-level default.
+* **Validation**: `require-service-auth.ts` extracts the bearer token, length-checks it against
+  the configured key, then compares with `crypto.timingSafeEqual` (only if lengths already
+  match, since `timingSafeEqual` throws on a length mismatch rather than returning `false`).
+  First use of `timingSafeEqual` in this codebase; justified because this key is compared
+  directly in application code on every request, unlike the session token (looked up by
+  equality inside Postgres). Exported as `safeCompare()` and reused by the per-organization
+  check below.
+* **Scope**: proves "a trusted internal service," nothing about *which* organization — see §8.2
+  for what actually authorizes a specific organization.
+* **Revocation/rotation**: manual only. An operator generates a new value and updates it on both
+  services, then restarts both. No dual-key/grace-period support — rotation causes a brief
+  availability gap unless both restarts are coordinated. No automatic expiry/TTL.
+* **Unauthorized behavior**: missing header, non-`Bearer` scheme, wrong-length key, and
+  right-length-but-wrong key all produce an identical `401 { "error": "Not authenticated." }` —
+  no distinction is leaked between failure modes. Verified by dedicated tests
+  (`apps/api/tests/internal-api.test.ts`).
+
+### 8.2 Per-organization credential (`X-Organization-Service-Token`)
+
+* **Format**: a per-organization, long (32-byte / 256-bit), random, opaque token, generated once
+  inside the same database transaction as organization creation
+  (`src/auth/organization-service-token.ts#generateOrganizationServiceToken`,
+  `crypto.randomBytes(32).toString("hex")`).
+* **Storage**: only its SHA-256 hash is persisted, in
+  `organization_service_credentials.token_hash` — the same hashed-credential discipline already
+  used for session tokens (`sessions.id`). A leaked database row cannot be used to authenticate.
+  `organization_id` is the table's PRIMARY KEY, so exactly one credential exists per
+  organization, enforced at the database level, not just in application code.
+* **Exposure**: the raw token is returned to the caller **exactly once**, in the response body
+  of `POST /organizations` (organization creation) — never persisted in plaintext anywhere,
+  never logged, and never returned by any other endpoint (`GET`/list/update organizations, the
+  public receptionist-config endpoint, or the internal `runtime-context`/`knowledge` responses
+  themselves). Verified by dedicated tests asserting the raw token and the word `tokenHash`
+  never appear in any of those response bodies.
+* **Validation**: `require-organization-service-token.ts`, mounted *after* `requireServiceAuth`
+  on every `/internal/v1/organizations/:organizationId/...` route. It looks up the stored hash
+  for the URL's `:organizationId`, hashes the presented `X-Organization-Service-Token`, and
+  compares it with the same `safeCompare()` constant-time helper used for the global key.
+* **This is what actually authorizes a specific organization** — not the global key. A token
+  issued for organization A is checked only against organization A's stored hash; presenting it
+  against any other organization's URL fails, because that other organization's stored hash is
+  different. This is independently re-verified against the database on every request — the same
+  "never trust the id merely because it's present in the URL" pattern `requireOrgMembership`
+  uses for user sessions (§1), just keyed by a token hash instead of a membership row.
+* **Response codes**: three-tiered, distinct from the global key's 401 — `404` if the
+  organization doesn't exist at all (no credential row, non-enumeration convention); `403` if
+  the organization exists but the presented token is missing, wrong-length, or simply wrong for
+  that organization. Verified by tests covering same-org success, cross-org denial (organization
+  A's token against organization B's and a freshly created organization C's URLs), a missing
+  token, a wrong token, and a wrong-length token via the explicit length-guard path.
+* **Revocation/rotation**: manual only, and more limited than the global key — M5 has no
+  reissue/rotation endpoint for a compromised organization token; recovering from a leaked token
+  currently requires a direct database update. Deliberately accepted as a known gap for this
+  foundation milestone (see §7), not an oversight.
+
+### 8.3 Combined model
+
+* **Neither credential alone establishes tenant authorization.** A valid `INTERNAL_SERVICE_KEY`
+  with no organization token, or with the wrong organization's token, is rejected (403) before
+  reaching any organization data — see §8.2. A correct organization token without a valid global
+  key never reaches the tenant check at all — `requireServiceAuth` runs first and 401s.
+* **Isolation from user auth**: a valid service credential (either or both) does not authorize
+  `/organizations/...` (user-only routes), and a valid session cookie does not authorize
+  `/internal/v1/...` (service-only routes) — verified by an explicit cross-auth test, not
+  assumed from the two middleware chains being separately correct.
+* **Logging**: both credentials are covered by `config/logger.ts`'s redaction —
+  `INTERNAL_SERVICE_KEY` via the standard `req.headers.authorization` entry (no logger change
+  needed, since it's sent under the standard header name), and `X-Organization-Service-Token`
+  via an explicit `req.headers["x-organization-service-token"]` entry added specifically for it
+  (bracket notation is required because fast-redact rejects hyphens in dot-path syntax). No test
+  found either raw value in any log output or HTTP response body.

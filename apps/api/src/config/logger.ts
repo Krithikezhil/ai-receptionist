@@ -3,5 +3,10 @@ import { env } from "./env.js";
 
 export const logger = pino({
   level: env.logLevel,
-  redact: ["req.headers.authorization", "req.headers.cookie"],
+  // Also redacts the per-organization service token header.
+  redact: [
+    "req.headers.authorization",
+    "req.headers.cookie",
+    'req.headers["x-organization-service-token"]',
+  ],
 });

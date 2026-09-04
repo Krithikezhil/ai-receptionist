@@ -20,6 +20,10 @@ export function createOrganizationController(orgService: OrganizationService) {
         membership: result.membership,
         businessProfile: result.businessProfile,
         receptionistConfig: result.receptionistConfig,
+        // Shown exactly once, here — never persisted in plaintext and never
+        // returned by any other endpoint (get/update/list). See
+        // organization.service.ts#createOrganization.
+        serviceCredential: result.serviceCredential,
       });
     },
 

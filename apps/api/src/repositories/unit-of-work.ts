@@ -4,6 +4,7 @@ import type {
   MembershipRepository,
   OrganizationRepository,
 } from "./organization-types.js";
+import type { OrganizationServiceCredentialRepository } from "./organization-service-credential-types.js";
 import type { ReceptionistConfigRepository } from "./receptionist-config-types.js";
 
 export interface OrganizationCreationRepos {
@@ -12,6 +13,7 @@ export interface OrganizationCreationRepos {
   businessProfiles: BusinessProfileRepository;
   businessHours: BusinessHoursRepository;
   receptionistConfigs: ReceptionistConfigRepository;
+  organizationServiceCredentials: OrganizationServiceCredentialRepository;
 }
 
 /**

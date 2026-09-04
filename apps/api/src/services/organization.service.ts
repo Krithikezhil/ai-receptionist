@@ -1,3 +1,7 @@
+import {
+  generateOrganizationServiceToken,
+  hashOrganizationServiceToken,
+} from "../auth/organization-service-token.js";
 import type { BusinessHoursEntryInput } from "../repositories/organization-types.js";
 import type {
   BusinessProfile,
@@ -15,6 +19,14 @@ export interface CreateOrganizationResult {
   membership: OrganizationMembership;
   businessProfile: BusinessProfile;
   receptionistConfig: ReceptionistConfiguration;
+  /**
+   * The raw per-organization service credential (see
+   * auth/organization-service-token.ts) — present ONLY in the direct result
+   * of createOrganization, never persisted in plaintext (only its SHA-256
+   * hash is stored) and never returned by any other endpoint. The caller
+   * must capture it now; it cannot be retrieved again later.
+   */
+  serviceCredential: { token: string };
 }
 
 export interface OrganizationService {
@@ -81,7 +93,24 @@ export function createOrganizationService(
           organizationId: organization.id,
         });
 
-        return { organization, membership, businessProfile, receptionistConfig };
+        // Generated once, inside this transaction, so an organization is
+        // never left without its service credential by construction (same
+        // reasoning as the owner membership above). Only the hash is
+        // persisted; the raw token is returned to the caller and discarded
+        // here — this function never logs or stores it a second time.
+        const rawServiceToken = generateOrganizationServiceToken();
+        await repos.organizationServiceCredentials.create({
+          organizationId: organization.id,
+          tokenHash: hashOrganizationServiceToken(rawServiceToken),
+        });
+
+        return {
+          organization,
+          membership,
+          businessProfile,
+          receptionistConfig,
+          serviceCredential: { token: rawServiceToken },
+        };
       });
     },
 

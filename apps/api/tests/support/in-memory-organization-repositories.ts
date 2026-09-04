@@ -21,6 +21,11 @@ import type {
   ServiceRepository,
 } from "../../src/repositories/organization-types.js";
 import type {
+  NewOrganizationServiceCredential,
+  OrganizationServiceCredential,
+  OrganizationServiceCredentialRepository,
+} from "../../src/repositories/organization-service-credential-types.js";
+import type {
   NewReceptionistConfiguration,
   ReceptionistConfigRepository,
   ReceptionistConfiguration,
@@ -324,6 +329,24 @@ export function createInMemoryReceptionistConfigRepository(): ReceptionistConfig
       updated.updatedAt = new Date();
       configs.set(existing.id, updated);
       return updated;
+    },
+  };
+}
+
+export function createInMemoryOrganizationServiceCredentialRepository(): OrganizationServiceCredentialRepository {
+  const credentials = new Map<string, OrganizationServiceCredential>();
+
+  return {
+    async create(newCredential: NewOrganizationServiceCredential) {
+      const credential: OrganizationServiceCredential = {
+        ...newCredential,
+        createdAt: new Date(),
+      };
+      credentials.set(credential.organizationId, credential);
+      return credential;
+    },
+    async findByOrganizationId(organizationId) {
+      return credentials.get(organizationId);
     },
   };
 }
