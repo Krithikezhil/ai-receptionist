@@ -1,5 +1,7 @@
 import type { RuntimeContext, RuntimeKnowledgeEntry } from "@ai-receptionist/shared";
 import type { Request, Response } from "express";
+import { generateCallCredential } from "../auth/call-credential.js";
+import type { OrganizationPhoneNumberRepository } from "../repositories/organization-phone-number-types.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
@@ -15,6 +17,8 @@ export interface InternalControllerDeps {
   servicesCatalogService: ServicesCatalogService;
   knowledgeService: KnowledgeService;
   receptionistConfigService: ReceptionistConfigService;
+  organizationPhoneNumbers: OrganizationPhoneNumberRepository;
+  twilioCallCredentialSecret: string;
 }
 
 /**
@@ -123,6 +127,43 @@ export function createInternalController(deps: InternalControllerDeps) {
         active: e.active,
       }));
       res.status(200).json({ knowledge });
+    },
+
+    /**
+     * M7: resolves an inbound Twilio call's dialed number to the
+     * organization it belongs to, and mints a short-lived, call-bound
+     * credential (auth/call-credential.ts) for that one call -- the sole
+     * minting site for M7 call credentials. Deliberately guarded by
+     * requireServiceAuth ONLY (see routes/internal.routes.ts): the caller
+     * cannot present an organization-scoped credential for an organization
+     * it doesn't know yet, so this is the one internal-API route that
+     * establishes organization identity rather than verifying it against
+     * an already-known :organizationId.
+     *
+     * Never logs the phone number, callSid, or the minted credential --
+     * only structural outcomes (found/not-found) reach any logger, via the
+     * standard pino-http request logger in app.ts (status code only).
+     */
+    async lookupPhoneNumber(req: Request, res: Response): Promise<void> {
+      const phoneNumber = req.params.phoneNumber as string;
+      const callSid = typeof req.query.callSid === "string" ? req.query.callSid : undefined;
+      if (!callSid) {
+        res.status(400).json({ error: "Missing callSid query parameter." });
+        return;
+      }
+
+      const match = await deps.organizationPhoneNumbers.findByPhoneNumber(phoneNumber);
+      if (!match) {
+        res.status(404).json({ error: "No organization is mapped to this phone number." });
+        return;
+      }
+
+      const callCredential = generateCallCredential(
+        match.organizationId,
+        callSid,
+        deps.twilioCallCredentialSecret,
+      );
+      res.status(200).json({ organizationId: match.organizationId, callCredential });
     },
   };
 }

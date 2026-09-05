@@ -5,6 +5,7 @@ import helmet from "helmet";
 import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
+import type { OrganizationPhoneNumberRepository } from "./repositories/organization-phone-number-types.js";
 import type { OrganizationServiceCredentialRepository } from "./repositories/organization-service-credential-types.js";
 import type { MembershipRepository } from "./repositories/organization-types.js";
 import { createRepositories } from "./repositories/index.js";
@@ -24,6 +25,10 @@ import {
   type OrganizationService,
 } from "./services/organization.service.js";
 import {
+  createPhoneNumberService,
+  type PhoneNumberService,
+} from "./services/phone-number.service.js";
+import {
   createReceptionistConfigService,
   type ReceptionistConfigService,
 } from "./services/receptionist-config.service.js";
@@ -42,9 +47,13 @@ export interface AppDependencies {
   servicesCatalogService?: ServicesCatalogService;
   knowledgeService?: KnowledgeService;
   receptionistConfigService?: ReceptionistConfigService;
+  phoneNumberService?: PhoneNumberService;
   /** Injected in tests with a fixed test value instead of a real env secret. */
   internalServiceKey?: string;
   organizationServiceCredentials?: OrganizationServiceCredentialRepository;
+  organizationPhoneNumbers?: OrganizationPhoneNumberRepository;
+  /** Injected in tests with a fixed test value instead of a real env secret. */
+  twilioCallCredentialSecret?: string;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
@@ -77,6 +86,17 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.internalServiceKey ?? env.internalServiceKey ?? randomBytes(32).toString("hex");
   const organizationServiceCredentials =
     deps.organizationServiceCredentials ?? repos.organizationServiceCredentials;
+  const organizationPhoneNumbers =
+    deps.organizationPhoneNumbers ?? repos.organizationPhoneNumbers;
+  // Same random-per-boot-if-unset treatment as internalServiceKey above,
+  // and for the same reason: Twilio's own routes should fail closed (no
+  // credential minted before this boot could ever verify) rather than the
+  // whole process refusing to start over a secret most deployments won't
+  // configure -- see config/env.ts.
+  const twilioCallCredentialSecret =
+    deps.twilioCallCredentialSecret ?? env.twilioCallCredentialSecret ?? randomBytes(32).toString("hex");
+  const phoneNumberService =
+    deps.phoneNumberService ?? createPhoneNumberService(organizationPhoneNumbers);
 
   const app = express();
 
@@ -96,6 +116,7 @@ export function createApp(deps: AppDependencies = {}): Express {
         servicesCatalogService,
         knowledgeService,
         receptionistConfigService,
+        phoneNumberService,
       },
       {
         organizationService,
@@ -106,6 +127,8 @@ export function createApp(deps: AppDependencies = {}): Express {
         receptionistConfigService,
         internalServiceKey,
         organizationServiceCredentials,
+        organizationPhoneNumbers,
+        twilioCallCredentialSecret,
       },
     ),
   );

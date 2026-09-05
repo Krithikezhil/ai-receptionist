@@ -766,6 +766,130 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
   future log call added outside `session.py`'s existing pattern is not mechanically prevented from
   violating it.
 
+## Completed -- M7 Twilio Inbound Calls
+
+**Tenant-safe phone-number routing (apps/api)**
+- [x] `organization_phone_numbers` table (`id` primary key, `organization_id` a plain indexed FK,
+      `phone_number` unique) -- deliberately supports multiple numbers per organization from the
+      first migration, not just one
+- [x] Owner-gated `POST`/`GET`/`DELETE /organizations/:id/phone-numbers` -- E.164 validation,
+      duplicate-number rejection (409, checked against any organization), cross-tenant isolation
+      verified by tests
+- [x] `GET /internal/v1/twilio/phone-numbers/:phoneNumber` (service-auth only -- no
+      organization-scoped token exists yet at this point) resolves the dialed number and mints a
+      short-lived, call-bound credential for it
+
+**Call credential (`auth/call-credential.ts` + `twilio/call_credential.py`)**
+- [x] HMAC-SHA256 over a base64url-encoded JSON payload (`organization_id`, `call_sid`, `exp`) --
+      deliberately not a JWT (no `alg` field, no new dependency); a hand-rolled two-part token
+      verified independently in both Node (mint + verify) and Python (verify-only), with an
+      interoperability test proving a token minted by a from-scratch reimplementation of the
+      Node algorithm verifies correctly in the Python implementation
+- [x] 4-hour TTL, justified rather than arbitrary: `call_sid` binding (checked against Twilio's
+      own real `CallSid` for the connection presenting the token) is the primary defense against
+      replay across calls; the TTL is a generous backstop bound chosen far above any realistic
+      call duration, so no real call risks losing authorization mid-conversation
+      (`session.py`'s `ApiClient` sets its auth header once, at construction, with no
+      mid-session re-authentication)
+- [x] `exp` validated as a strict int, not merely `int | float` -- Python's `bool` is an `int`
+      subclass, so both a float and a bool `exp` are explicitly rejected as malformed, even when
+      correctly signed
+- [x] Timing-safe comparison on both sides (`crypto.timingSafeEqual` / `hmac.compare_digest`)
+
+**M5 boundary preserved, not extended**
+- [x] `middleware/require-organization-service-token.ts` has a byte-for-byte empty diff --
+      confirmed via `git diff` at every verification step throughout M7, not just asserted
+- [x] A new, separate `middleware/require-organization-auth.ts` composes the call-credential
+      check *in front of* the unmodified original middleware (tries the credential first; falls
+      through to the exact same original function for anything that isn't a valid credential) --
+      proven byte-identical to calling the original middleware directly, for five scenarios, in
+      `tests/require-organization-auth.test.ts`
+
+**Twilio webhook and Media Stream bridge (services/voice-agent)**
+- [x] `POST /twilio/voice`: strict order enforced and tested -- signature validation (stdlib
+      `hmac`/`hashlib`/`base64`, no `twilio` SDK dependency) against an explicitly
+      operator-configured `VOICE_AGENT_PUBLIC_BASE_URL` (never derived from `X-Forwarded-*`
+      headers) happens before any organization lookup; an invalid/missing signature 403s with
+      zero calls to apps/api, verified by a mock-call-count assertion, not just the response code
+- [x] Phone number not mapped, or apps/api unreachable -> a generic spoken failure message +
+      hangup TwiML, `200`, never a raw error or `500` to the caller
+- [x] `WS /twilio/media-stream`: the call credential is verified **locally** (pure HMAC, no
+      network, no DB) before any Pipecat object (`TwilioFrameSerializer`,
+      `FastAPIWebsocketTransport`) is constructed -- an unauthenticated connection costs at most
+      one WS handshake, two small JSON reads, and one HMAC computation
+- [x] **Tenant identity comes only from the verified credential** -- the WS handshake's own
+      `organization_id` custom parameter is read only for an observability log line and never
+      influences which organization the session runs for; proven by a dedicated adversarial test
+      (`organization_id=org-B` in the metadata alongside a credential validly signed for org A ->
+      `session.run_session()` is called with org A)
+- [x] `session.run_session()` -- the M6 orchestrator -- is called completely unmodified; the
+      credential string itself is passed through as the existing opaque
+      `organization_service_token` parameter, exactly as `bot.py` already does with the dev token
+- [x] `TwilioFrameSerializer` constructed with `auto_hang_up=False` explicitly -- relies on the
+      documented `<Connect><Stream>` TwiML semantics (the call ends when the connected stream
+      disconnects) rather than requiring `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` for an explicit
+      REST hangup call; `auto_hang_up=True` is a documented, dependency-free fallback if the
+      manual live-call test shows this doesn't reliably end the call
+
+**Tests**
+- [x] `tests/call-credential.test.ts` (13), `tests/require-organization-auth.test.ts` (14),
+      `tests/twilio-phone-lookup.test.ts` (9), `tests/phone-numbers.test.ts` (19) -- apps/api,
+      138 total tests passing (up from 83 pre-M7)
+- [x] `tests/test_twilio_signature.py` (9), `tests/test_twilio_call_credential.py` (12),
+      `tests/test_twilio_webhook.py` (9, `respx`-mocked HTTP, never monkeypatching the lookup
+      function itself), `tests/test_twilio_media_stream.py` (10, `session.run_session`
+      monkeypatched at the point `routes/twilio.py` imports it, matching `test_session.py`'s own
+      established pattern; a realistic two-message Twilio handshake in every test, matching what
+      `parse_telephony_websocket` actually expects) -- voice-agent, 108 total tests passing (up
+      from 62 pre-M7)
+- [x] `session.py`, `pipeline.py`, `runtime/context.py`, `providers/factory.py`,
+      `tools/search_knowledge.py`, `logging_config.py` -- confirmed zero diff at every M7
+      verification step, not just at the end
+
+**Documentation**
+- [x] ARCHITECTURE.md §14 (Twilio Inbound Calls) added; §5, §12.4, §13.3 corrected where M7
+      changed or clarified them (including a stale M6-era assumption about *how* M7 would
+      integrate with Pipecat's transport factory, which turned out not to match what was
+      actually built)
+- [x] SECURITY.md §10 (Twilio inbound call security) added; stale `M5` status label corrected to
+      `M7`
+- [x] `.env.example`, `IMPLEMENTATION_PLAN.md`, `services/voice-agent/README.md`, root
+      `README.md`, `DEPLOYMENT.md` updated; M1-M6 content left alone except where it names M7 or
+      a fact M7 changed
+
+## Remaining M7 work
+
+- [ ] **Real live Twilio/PSTN call not yet performed in this environment** -- no real Twilio
+      account was available during implementation. Structural/unit verification is complete
+      (CI-safe, zero real Twilio credentials); an actual inbound call from a real phone, through
+      real Twilio, into real Deepgram/OpenAI/Cartesia, remains the outstanding gate before this
+      milestone can be called fully done -- including whether `auto_hang_up=False` actually ends
+      the call reliably on a real connection. Do not treat M7 as live-call-verified until this is
+      run and confirmed.
+- [ ] SMS, outbound calling, call recording/transcription storage, CRM integration, lead capture,
+      appointment booking, payments, call analytics -- all explicitly out of scope for M7, per
+      the approved M7 plan; unchanged from M5/M6's own exclusion lists where applicable.
+- [ ] No `apps/web` UI for phone-number provisioning -- settable via the authenticated API today;
+      a dashboard page is a natural, separately scoped follow-up.
+
+## Known limitations (M7 additions)
+
+- **Real Twilio/PSTN behavior is unverified in this environment** -- every automated test runs
+  against fakes/mocks; no real Twilio webhook, signature, or Media Stream connection has actually
+  been exercised. See "Remaining M7 work" above.
+- **No nonce/single-use replay tracking for call credentials** -- bounded by the 4-hour TTL and
+  `call_sid` binding instead (see the "Call credential" section above); a credential leaked
+  during its narrow validity window could in principle be replayed against the same call, an
+  accepted, documented trade-off rather than an oversight.
+- **No connection-rate limiting or concurrent-connection cap on `/twilio/media-stream`** -- the
+  credential-before-any-expensive-work ordering bounds the *cost* of an unauthenticated
+  connection attempt, but nothing caps how many such attempts can happen concurrently; left to a
+  future, infra-aware milestone (a reverse proxy/load balancer in front of a real deployment is
+  the natural place for this, not application code here).
+- **`auto_hang_up=False` is unverified against a real call** -- relies on documented
+  `<Connect><Stream>` TwiML semantics that have not been confirmed against real Twilio traffic;
+  `auto_hang_up=True` is the documented fallback if the manual live-call test shows otherwise.
+
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M7 through M15.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M8 through M15.

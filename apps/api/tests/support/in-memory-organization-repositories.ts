@@ -21,6 +21,11 @@ import type {
   ServiceRepository,
 } from "../../src/repositories/organization-types.js";
 import type {
+  NewOrganizationPhoneNumber,
+  OrganizationPhoneNumber,
+  OrganizationPhoneNumberRepository,
+} from "../../src/repositories/organization-phone-number-types.js";
+import type {
   NewOrganizationServiceCredential,
   OrganizationServiceCredential,
   OrganizationServiceCredentialRepository,
@@ -347,6 +352,39 @@ export function createInMemoryOrganizationServiceCredentialRepository(): Organiz
     },
     async findByOrganizationId(organizationId) {
       return credentials.get(organizationId);
+    },
+  };
+}
+
+export function createInMemoryOrganizationPhoneNumberRepository(): OrganizationPhoneNumberRepository {
+  const rows = new Map<string, OrganizationPhoneNumber>();
+
+  return {
+    async listByOrganizationId(organizationId) {
+      return [...rows.values()].filter((r) => r.organizationId === organizationId);
+    },
+    async findByPhoneNumber(phoneNumber) {
+      return [...rows.values()].find((r) => r.phoneNumber === phoneNumber);
+    },
+    async findByIdAndOrganizationId(id, organizationId) {
+      const row = rows.get(id);
+      return row && row.organizationId === organizationId ? row : undefined;
+    },
+    async create(newPhoneNumber: NewOrganizationPhoneNumber) {
+      const row: OrganizationPhoneNumber = {
+        id: randomUUID(),
+        organizationId: newPhoneNumber.organizationId,
+        phoneNumber: newPhoneNumber.phoneNumber,
+        createdAt: new Date(),
+      };
+      rows.set(row.id, row);
+      return row;
+    },
+    async deleteByIdAndOrganizationId(id, organizationId) {
+      const row = rows.get(id);
+      if (row && row.organizationId === organizationId) {
+        rows.delete(id);
+      }
     },
   };
 }

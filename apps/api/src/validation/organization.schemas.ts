@@ -61,9 +61,19 @@ export const createServiceSchema = z.object({
 
 export const updateServiceSchema = createServiceSchema.partial();
 
+/** E.164: a leading "+", then 2-15 digits total, first digit non-zero.
+ * See the approved M7 plan §11 -- this is deliberately the only validation
+ * (no carrier/format lookup), matching the rest of this codebase's
+ * preference for simple, well-documented regex validation over an external
+ * dependency for something this narrow. */
+export const createPhoneNumberSchema = z.object({
+  phoneNumber: z.string().regex(/^\+[1-9]\d{1,14}$/, "Must be E.164 format, e.g. +15551234567."),
+});
+
 export type CreateOrganizationInput = z.infer<typeof createOrganizationSchema>;
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;
 export type BusinessProfileInput = z.infer<typeof businessProfileSchema>;
 export type BusinessHoursInput = z.infer<typeof businessHoursSchema>;
 export type CreateServiceInput = z.infer<typeof createServiceSchema>;
 export type UpdateServiceInput = z.infer<typeof updateServiceSchema>;
+export type CreatePhoneNumberInput = z.infer<typeof createPhoneNumberSchema>;

@@ -17,10 +17,11 @@ from __future__ import annotations
 
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
-from voice_agent.clients.models import KnowledgeEntry, RuntimeContext
+from voice_agent.clients.models import KnowledgeEntry, PhoneNumberLookup, RuntimeContext
 
 
 class ApiClientError(Exception):
@@ -145,3 +146,60 @@ class ApiClient:
 
         result: dict[str, Any] = response.json()
         return result
+
+
+async def lookup_organization_by_phone_number(
+    base_url: str,
+    internal_service_key: str | None,
+    phone_number: str,
+    call_sid: str,
+    *,
+    timeout: float = 10.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> PhoneNumberLookup:
+    """Calls GET /internal/v1/twilio/phone-numbers/:phoneNumber to resolve
+    which organization a dialed Twilio number belongs to, and receive a
+    freshly minted call credential for it (see
+    apps/api/src/controllers/internal.controller.ts's lookupPhoneNumber).
+
+    Deliberately NOT a method on ApiClient: that class is inherently
+    org-scoped from construction (it always sends both INTERNAL_SERVICE_KEY
+    and an organization service token -- see __init__'s fail-closed checks
+    above, which this function does not touch or weaken). This call
+    happens BEFORE any organization is known at all, guarded by
+    requireServiceAuth only (see internal.routes.ts), so it has no
+    organization-scoped token to send. See the approved M7 plan section 12.
+    """
+    if not internal_service_key:
+        raise ApiConfigurationError(
+            "INTERNAL_SERVICE_KEY is not set — cannot call the internal voice API."
+        )
+
+    path = f"/internal/v1/twilio/phone-numbers/{quote(phone_number, safe='')}"
+
+    async with httpx.AsyncClient(
+        base_url=base_url,
+        headers={"Authorization": f"Bearer {internal_service_key}"},
+        timeout=timeout,
+        transport=transport,
+    ) as client:
+        try:
+            response = await client.get(path, params={"callSid": call_sid})
+        except httpx.RequestError as exc:
+            raise ApiUnreachableError(
+                f"Could not reach apps/api for the phone-number lookup: {exc}"
+            ) from exc
+
+        if response.status_code == 401:
+            raise ApiUnauthorizedError("apps/api rejected the internal service credential.")
+        if response.status_code == 404:
+            raise ApiNotFoundError("No organization is mapped to this phone number.")
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ApiClientError(
+                f"apps/api returned {response.status_code} for the phone-number lookup."
+            ) from exc
+
+        return PhoneNumberLookup.model_validate(response.json())

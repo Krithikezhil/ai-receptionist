@@ -93,8 +93,29 @@ requires real, locally-configured provider keys — see TASKS.md for current sta
 
 ## M7 — Twilio inbound calls
 
-Twilio phone number provisioning and inbound call handling, wired into the M5 voice agent.
-Outbound calling is out of scope here and is not currently planned as a near-term milestone.
+Bridges a real inbound Twilio phone call into the unmodified M6 runtime. `apps/api` gains a
+`organization_phone_numbers` table, owner-gated provisioning endpoints
+(`POST`/`GET`/`DELETE /organizations/:id/phone-numbers`), a service-auth-only internal lookup
+endpoint (`GET /internal/v1/twilio/phone-numbers/:phoneNumber`) that resolves a dialed number to
+an organization and mints a short-lived, call-bound credential, and a new composed
+`requireOrganizationAuth` middleware that accepts that credential *in addition to* the existing
+M5 per-organization token — the original M5 middleware is unmodified and independently
+re-tested for equivalence. `services/voice-agent` gains `POST /twilio/voice` (validates
+`X-Twilio-Signature` before any other processing, looks up the organization, returns TwiML) and
+`WS /twilio/media-stream` (verifies the call credential *locally* — before any Pipecat object is
+constructed — then calls the exact same `session.run_session()` `bot.py` already uses). Tenant
+identity comes only from the verified credential, never from the WebSocket's own metadata
+parameters, even when that metadata actively disagrees — proven by a dedicated adversarial test.
+See ARCHITECTURE.md §14 and SECURITY.md §10 for the full design.
+
+Automated tests (fakes/mocks and `respx`-mocked HTTP only, zero real Twilio credentials in CI)
+cover signature validation (including a mismatched-canonical-URL case), call-credential
+mint/verify interoperability between the Node and Python implementations, the fail-closed
+webhook order, and the WebSocket's credential-before-any-expensive-work ordering. An actual live
+call over real Twilio + real Deepgram/OpenAI/Cartesia is the manual verification gate for this
+milestone, tracked separately since it requires a real Twilio account — see TASKS.md for current
+status. Outbound calling, SMS, and call recording/transcription storage remain explicitly out of
+scope.
 
 ## M8 — Knowledge retrieval / RAG
 

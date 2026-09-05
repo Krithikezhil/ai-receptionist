@@ -4,6 +4,7 @@ import { createBusinessHoursService } from "../../src/services/business-hours.se
 import { createBusinessProfileService } from "../../src/services/business-profile.service.js";
 import { createKnowledgeService } from "../../src/services/knowledge.service.js";
 import { createOrganizationService } from "../../src/services/organization.service.js";
+import { createPhoneNumberService } from "../../src/services/phone-number.service.js";
 import { createReceptionistConfigService } from "../../src/services/receptionist-config.service.js";
 import { createServicesCatalogService } from "../../src/services/services-catalog.service.js";
 import {
@@ -14,6 +15,7 @@ import {
   createInMemoryBusinessHoursRepository,
   createInMemoryBusinessProfileRepository,
   createInMemoryKnowledgeRepository,
+  createInMemoryOrganizationPhoneNumberRepository,
   createInMemoryOrganizationRepositories,
   createInMemoryOrganizationServiceCredentialRepository,
   createInMemoryReceptionistConfigRepository,
@@ -48,6 +50,16 @@ import {
 export const TEST_INTERNAL_SERVICE_KEY =
   "test-internal-service-key-0123456789abcdef0123456789abcdef";
 
+/**
+ * Fixed test value for the M7 call-credential secret — mirrors
+ * TEST_INTERNAL_SERVICE_KEY's role, just for the second, independent M7
+ * secret (see auth/call-credential.ts). Exported so tests can mint a
+ * matching credential without duplicating this literal (see
+ * tests/twilio-phone-lookup.test.ts).
+ */
+export const TEST_TWILIO_CALL_CREDENTIAL_SECRET =
+  "test-twilio-call-credential-secret-0123456789abcdef";
+
 export function buildTestApp() {
   const users = createInMemoryUserRepository();
   const sessions = createInMemorySessionRepository();
@@ -60,6 +72,7 @@ export function buildTestApp() {
   const knowledge = createInMemoryKnowledgeRepository();
   const receptionistConfigs = createInMemoryReceptionistConfigRepository();
   const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
+  const organizationPhoneNumbers = createInMemoryOrganizationPhoneNumberRepository();
   const unitOfWork = createInMemoryUnitOfWork({
     organizations,
     memberships,
@@ -75,6 +88,7 @@ export function buildTestApp() {
   const servicesCatalogService = createServicesCatalogService(services);
   const knowledgeService = createKnowledgeService(knowledge);
   const receptionistConfigService = createReceptionistConfigService(receptionistConfigs);
+  const phoneNumberService = createPhoneNumberService(organizationPhoneNumbers);
 
   const deps: Required<AppDependencies> = {
     authService,
@@ -85,8 +99,11 @@ export function buildTestApp() {
     servicesCatalogService,
     knowledgeService,
     receptionistConfigService,
+    phoneNumberService,
     internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
     organizationServiceCredentials,
+    organizationPhoneNumbers,
+    twilioCallCredentialSecret: TEST_TWILIO_CALL_CREDENTIAL_SECRET,
   };
 
   const app = createApp(deps);
@@ -103,5 +120,6 @@ export function buildTestApp() {
     knowledge,
     receptionistConfigs,
     organizationServiceCredentials,
+    organizationPhoneNumbers,
   };
 }

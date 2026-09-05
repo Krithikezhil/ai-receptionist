@@ -241,3 +241,23 @@ export const organizationServiceCredentials = pgTable("organization_service_cred
 export type OrganizationServiceCredentialRow = typeof organizationServiceCredentials.$inferSelect;
 export type NewOrganizationServiceCredentialRow =
   typeof organizationServiceCredentials.$inferInsert;
+
+/**
+ * M7: maps a Twilio phone number to the organization it rings. `id` is the
+ * primary key (not organizationId) so one organization can own several
+ * numbers -- only `phoneNumber` itself is unique, preventing the same number
+ * from being claimed by two organizations. See
+ * src/repositories/organization-phone-number-types.ts and
+ * src/controllers/phone-number.controller.ts (owner-gated provisioning).
+ */
+export const organizationPhoneNumbers = pgTable("organization_phone_numbers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  phoneNumber: text("phone_number").notNull().unique(), // E.164, e.g. "+15551234567"
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type OrganizationPhoneNumberRow = typeof organizationPhoneNumbers.$inferSelect;
+export type NewOrganizationPhoneNumberRow = typeof organizationPhoneNumbers.$inferInsert;

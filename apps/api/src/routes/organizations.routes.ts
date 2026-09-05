@@ -3,6 +3,7 @@ import { createBusinessHoursController } from "../controllers/business-hours.con
 import { createBusinessProfileController } from "../controllers/business-profile.controller.js";
 import { createKnowledgeController } from "../controllers/knowledge.controller.js";
 import { createOrganizationController } from "../controllers/organization.controller.js";
+import { createPhoneNumberController } from "../controllers/phone-number.controller.js";
 import { createReceptionistConfigController } from "../controllers/receptionist-config.controller.js";
 import { createServiceCatalogController } from "../controllers/service-catalog.controller.js";
 import { requireAuth } from "../middleware/require-auth.js";
@@ -13,6 +14,7 @@ import type { BusinessHoursService } from "../services/business-hours.service.js
 import type { BusinessProfileService } from "../services/business-profile.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
+import type { PhoneNumberService } from "../services/phone-number.service.js";
 import type { ReceptionistConfigService } from "../services/receptionist-config.service.js";
 import type { ServicesCatalogService } from "../services/services-catalog.service.js";
 
@@ -25,6 +27,7 @@ export interface OrganizationRouterDeps {
   servicesCatalogService: ServicesCatalogService;
   knowledgeService: KnowledgeService;
   receptionistConfigService: ReceptionistConfigService;
+  phoneNumberService: PhoneNumberService;
 }
 
 export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router {
@@ -38,6 +41,7 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   const catalog = createServiceCatalogController(deps.servicesCatalogService);
   const knowledge = createKnowledgeController(deps.knowledgeService);
   const receptionistConfig = createReceptionistConfigController(deps.receptionistConfigService);
+  const phoneNumbers = createPhoneNumberController(deps.phoneNumberService);
 
   router.post("/", auth, org.create);
   router.get("/", auth, org.list);
@@ -62,6 +66,18 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
 
   router.get("/:organizationId/receptionist-config", auth, membership, receptionistConfig.get);
   router.put("/:organizationId/receptionist-config", auth, membership, receptionistConfig.update);
+
+  // M7: create/remove additionally require the owner role -- enforced
+  // inside the controller (requireOrgMembership itself doesn't distinguish
+  // role, matching every other resource above; see phone-number.controller.ts).
+  router.get("/:organizationId/phone-numbers", auth, membership, phoneNumbers.list);
+  router.post("/:organizationId/phone-numbers", auth, membership, phoneNumbers.create);
+  router.delete(
+    "/:organizationId/phone-numbers/:phoneNumberId",
+    auth,
+    membership,
+    phoneNumbers.remove,
+  );
 
   return router;
 }

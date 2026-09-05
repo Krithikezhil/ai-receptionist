@@ -9,11 +9,13 @@ import pytest
 
 from voice_agent.clients.api_client import (
     ApiClient,
+    ApiClientError,
     ApiConfigurationError,
     ApiForbiddenError,
     ApiNotFoundError,
     ApiUnauthorizedError,
     ApiUnreachableError,
+    lookup_organization_by_phone_number,
 )
 
 ORG_ID = "11111111-1111-1111-1111-111111111111"
@@ -167,3 +169,112 @@ async def test_unreachable_server_raises_api_unreachable_error() -> None:
     ) as client:
         with pytest.raises(ApiUnreachableError):
             await client.get_runtime_context(ORG_ID)
+
+
+@pytest.mark.asyncio
+async def test_phone_number_lookup_sends_only_the_service_key_and_call_sid() -> None:
+    """No X-Organization-Service-Token is ever sent here -- this call is
+    what resolves which organization a call belongs to, before any
+    organization-scoped credential exists (see the approved M7 plan
+    section 12)."""
+    seen_headers: dict[str, str] = {}
+    seen_path = ""
+    seen_params: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_path
+        seen_headers.update(dict(request.headers))
+        seen_path = request.url.path
+        seen_params.update(dict(request.url.params))
+        return httpx.Response(
+            200, json={"organizationId": ORG_ID, "callCredential": "signed-credential-value"}
+        )
+
+    result = await lookup_organization_by_phone_number(
+        "http://internal-api.test",
+        "test-key",
+        "+15551234567",
+        "CA123",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.organization_id == ORG_ID
+    assert result.call_credential == "signed-credential-value"
+    assert seen_headers["authorization"] == "Bearer test-key"
+    assert "x-organization-service-token" not in seen_headers
+    assert seen_path == "/internal/v1/twilio/phone-numbers/+15551234567"
+    assert seen_params == {"callSid": "CA123"}
+
+
+@pytest.mark.asyncio
+async def test_phone_number_lookup_missing_internal_service_key_fails_closed() -> None:
+    with pytest.raises(ApiConfigurationError):
+        await lookup_organization_by_phone_number(
+            "http://internal-api.test", None, "+15551234567", "CA123"
+        )
+    with pytest.raises(ApiConfigurationError):
+        await lookup_organization_by_phone_number(
+            "http://internal-api.test", "", "+15551234567", "CA123"
+        )
+
+
+@pytest.mark.asyncio
+async def test_phone_number_lookup_401_raises_api_unauthorized_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "Not authenticated."})
+
+    with pytest.raises(ApiUnauthorizedError):
+        await lookup_organization_by_phone_number(
+            "http://internal-api.test",
+            "wrong-key",
+            "+15551234567",
+            "CA123",
+            transport=httpx.MockTransport(handler),
+        )
+
+
+@pytest.mark.asyncio
+async def test_phone_number_lookup_404_raises_api_not_found_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404, json={"error": "No organization is mapped to this phone number."}
+        )
+
+    with pytest.raises(ApiNotFoundError):
+        await lookup_organization_by_phone_number(
+            "http://internal-api.test",
+            "test-key",
+            "+19998887777",
+            "CA123",
+            transport=httpx.MockTransport(handler),
+        )
+
+
+@pytest.mark.asyncio
+async def test_phone_number_lookup_unreachable_server_raises_api_unreachable_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(ApiUnreachableError):
+        await lookup_organization_by_phone_number(
+            "http://internal-api.test",
+            "test-key",
+            "+15551234567",
+            "CA123",
+            transport=httpx.MockTransport(handler),
+        )
+
+
+@pytest.mark.asyncio
+async def test_phone_number_lookup_unexpected_status_raises_generic_api_client_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "Internal server error."})
+
+    with pytest.raises(ApiClientError):
+        await lookup_organization_by_phone_number(
+            "http://internal-api.test",
+            "test-key",
+            "+15551234567",
+            "CA123",
+            transport=httpx.MockTransport(handler),
+        )

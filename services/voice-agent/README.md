@@ -21,17 +21,23 @@ typically publish and test against 3.10–3.12 first); pinning now avoids a vers
 ```
 src/voice_agent/
   config.py       environment settings (incl. INTERNAL_SERVICE_KEY, provider/model selection,
-                  idle-timeout validation)
-  routes/         FastAPI routers — GET /health only
+                  idle-timeout validation, Twilio settings)
+  routes/         FastAPI routers — GET /health, POST /twilio/voice + WS /twilio/media-stream
+                  (twilio.py)
   services/       business logic, framework-agnostic (health)
-  clients/        typed HTTP client for apps/api's /internal/v1/* (api_client.py, models.py)
+  clients/        typed HTTP client for apps/api's /internal/v1/* (api_client.py, models.py) —
+                  incl. the service-auth-only phone-number lookup
   providers/      STT/LLM/TTS provider factory + fake/no-op doubles
   tools/          read-only function-calling tools (search_knowledge.py)
   runtime/        turns a fetched RuntimeContext into the LLM system prompt
-  pipeline.py     transport-agnostic bot pipeline construction, incl. turn-taking/VAD
+  twilio/         webhook signature verification, call-credential verification, TwiML/URL
+                  builders
+  pipeline.py     transport-agnostic bot pipeline construction, incl. turn-taking/VAD — unmodified
+                  by M7
   session.py      one session's lifecycle: fetch context, build pipeline, idle-timeout/
-                  provider-error/disconnect handling, guaranteed cleanup
-  logging_config.py  centralized, secret-safe logger factory
+                  provider-error/disconnect handling, guaranteed cleanup — unmodified by M7,
+                  reused as-is by the Twilio Media Stream bridge
+  logging_config.py  centralized, secret-safe logger factory — unmodified by M7
   bot.py          manual/local SmallWebRTCTransport smoke-test entry point — NOT in CI
   main.py         FastAPI app factory + entrypoint
 tests/            pytest — all against fakes/mocks, no network, no real credentials
@@ -63,6 +69,10 @@ non-CI step (see "Manual smoke test" below).
 * `GET /health` — liveness check. Does not check any external dependency (no database, no
   telephony provider, no Pipecat pipeline state) — the pipeline is constructed per-session, not
   exposed as an HTTP route of its own.
+* `POST /twilio/voice` — Twilio's inbound-call webhook (M7). Validates `X-Twilio-Signature`
+  before any other processing; see "Twilio inbound calls (M7)" below.
+* `WS /twilio/media-stream` — Twilio's Media Stream bridge (M7). Verifies a call credential
+  locally before starting a session; see "Twilio inbound calls (M7)" below.
 
 ## How a session works
 
@@ -91,7 +101,7 @@ these pieces together in order:
 See ARCHITECTURE.md §12 (foundations) and §13 (real providers, VAD, session lifecycle) for the
 full design of each piece.
 
-## Configuration (M5–M6)
+## Configuration (M5–M7)
 
 Requires `INTERNAL_SERVICE_KEY` (must match `apps/api`'s value exactly) and `API_BASE_URL`
 (defaults to `http://localhost:4000`) to call the internal voice API — see the root
@@ -119,6 +129,54 @@ service credential (`X-Organization-Service-Token`) — a separate, per-organiza
 `INTERNAL_SERVICE_KEY`. It is returned exactly once, in the response body of `apps/api`'s
 `POST /organizations` (organization creation) — there is no way to retrieve it again afterward.
 Treat it as a secret: never commit it, log it, or share it outside the operator who needs it.
+
+Both Twilio routes are optional per deployment — omitting their env vars leaves `GET /health` and
+the manual smoke test (below) fully working; only `/twilio/voice` and `/twilio/media-stream`
+themselves fail closed per-request. `TWILIO_AUTH_TOKEN` verifies `X-Twilio-Signature`.
+`VOICE_AGENT_PUBLIC_BASE_URL` is the exact public URL Twilio is configured to call — never derived
+from request headers — reused to build the `wss://` Media Stream URL in the response TwiML.
+`TWILIO_CALL_CREDENTIAL_SECRET` must match `apps/api`'s value exactly (shared, HMAC-verified
+call-bound credential — see ARCHITECTURE.md §14.3); apps/api falls back to a random per-boot value
+if unset, so a mismatch here simply means every credential fails verification, not a startup
+crash. See the root [.env.example](../../.env.example) for all three.
+
+## Twilio inbound calls (M7)
+
+A real inbound phone call reaches the exact same runtime as the manual smoke test below (same
+`session.run_session()`, same pipeline, same providers) via `routes/twilio.py` instead of
+`bot.py`. Full design: [ARCHITECTURE.md §14](../../ARCHITECTURE.md#14-twilio-inbound-calls-m7),
+[SECURITY.md §10](../../SECURITY.md#10-twilio-inbound-call-security-m7).
+
+**Automated coverage (CI-safe, no real Twilio account)**: `tests/test_twilio_signature.py`,
+`tests/test_twilio_call_credential.py`, `tests/test_twilio_webhook.py`,
+`tests/test_twilio_media_stream.py` — all against fakes/mocks/`respx`, exactly like every other
+test in this service.
+
+**Manual live-call verification (not yet performed in this environment)** — requires a real
+Twilio account, which was not available during implementation. Not part of CI; tracked as
+outstanding in [TASKS.md](../../TASKS.md). To actually run it:
+
+1. Provision one real Twilio phone number; assign it to a real test organization via
+   `POST /organizations/:organizationId/phone-numbers` (owner-authenticated).
+2. Run `apps/api` and this service publicly reachable (e.g. via ngrok), and set
+   `VOICE_AGENT_PUBLIC_BASE_URL` to that exact public URL.
+3. In the Twilio Console, set the number's voice webhook to
+   `<VOICE_AGENT_PUBLIC_BASE_URL>/twilio/voice`.
+4. Call the number from a real phone. Confirm: the webhook signature validates, TwiML is
+   returned, the Media Stream connects, the call credential verifies, and a real
+   Deepgram/OpenAI/Cartesia conversation happens end-to-end (or the fake providers respond, if
+   those are what's configured).
+5. Test interruption/barge-in over real PSTN audio.
+6. Let `VOICE_AGENT_IDLE_TIMEOUT_SECS` fire on a live call — confirm the fallback message is
+   spoken and the call actually ends (this is what would decide whether `auto_hang_up=True` is
+   needed instead of the current `False`).
+7. Hang up from the caller's side — confirm clean disconnect handling.
+8. Call an unmapped/wrong number — confirm a graceful spoken failure message, not a dropped call
+   or raw error.
+9. Confirm no secrets, signatures, or credentials appear in real logs during any of the above.
+
+Until this procedure has actually been run and its results recorded, M7 should be treated as
+structurally complete but **not** live-call-verified.
 
 ## Manual smoke test / local business demo (not part of CI)
 
@@ -238,14 +296,16 @@ session, no dangling audio), and Ctrl+C stops the whole runner process.
 5. Ask a question your knowledge base answers, then one it doesn't — confirm an honest "I
    don't know" instead of an invented answer.
 
-## M6 status
+## M7 status
 
 Pipecat is a normal dependency (`pipecat-ai`, pinned narrow — see ARCHITECTURE.md §12.4), with a
-transport-agnostic pipeline (now including a turn-taking/interruption detection stage), a
-provider factory supporting real Deepgram/OpenAI/Cartesia providers with model/voice
-configuration, a `session.py` lifecycle orchestrator (idle timeout, provider-error handling,
-disconnect handling, guaranteed cleanup), and one read-only tool (`search_knowledge`). No
-telephony transport of any kind exists — no Twilio, no phone numbers, no SIP, no production WebRTC
-infrastructure; that's M7. Real-provider behavior (an actual Deepgram/OpenAI/Cartesia conversation)
-has not yet been manually verified in this environment — see [TASKS.md](../../TASKS.md) and
-[ARCHITECTURE.md §13](../../ARCHITECTURE.md#13-real-ai-voice-runtime-m6).
+transport-agnostic pipeline (turn-taking/interruption detection stage), a provider factory
+supporting real Deepgram/OpenAI/Cartesia providers with model/voice configuration, a `session.py`
+lifecycle orchestrator (idle timeout, provider-error handling, disconnect handling, guaranteed
+cleanup), one read-only tool (`search_knowledge`), and, as of M7, a Twilio inbound-call webhook +
+Media Stream bridge (`routes/twilio.py`) that reuses that exact same runtime unmodified. No SIP,
+no production WebRTC infrastructure, no outbound calling, no SMS. Real-provider behavior (an
+actual Deepgram/OpenAI/Cartesia conversation, M6) and a real live Twilio/PSTN call (M7) have
+**not** yet been manually verified in this environment — see [TASKS.md](../../TASKS.md),
+[ARCHITECTURE.md §13](../../ARCHITECTURE.md#13-real-ai-voice-runtime-m6), and
+[ARCHITECTURE.md §14](../../ARCHITECTURE.md#14-twilio-inbound-calls-m7).

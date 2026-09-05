@@ -39,6 +39,17 @@ export const env = {
   // service can call /internal/v1/* without a browser session cookie.
   // Deliberately has NO code-level default, same reasoning as authSecret.
   internalServiceKey: process.env.INTERNAL_SERVICE_KEY,
+
+  // M7: a second, independent secret shared with services/voice-agent (see
+  // auth/call-credential.ts), used only to mint/verify short-lived,
+  // call-bound credentials for Twilio-originated sessions. Deliberately
+  // optional here (unlike authSecret/internalServiceKey) -- Twilio
+  // integration is optional per deployment; createApp() falls back to a
+  // random per-boot value when unset, the same fail-closed-not-throwing
+  // treatment internalServiceKey gets there. No assert*() function for
+  // this one: nothing should force every deployment to configure it just
+  // because /internal/v1 itself is always required.
+  twilioCallCredentialSecret: process.env.TWILIO_CALL_CREDENTIAL_SECRET,
 };
 
 /**

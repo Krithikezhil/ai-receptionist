@@ -83,3 +83,15 @@ class KnowledgeEntry(_CamelModel):
     content: str
     category: KnowledgeCategory
     active: bool
+
+
+class PhoneNumberLookup(_CamelModel):
+    """M7: GET /internal/v1/twilio/phone-numbers/:phoneNumber response --
+    resolves a dialed Twilio number to the organization it belongs to, and
+    a freshly minted, call-bound credential for it (see
+    apps/api/src/controllers/internal.controller.ts's lookupPhoneNumber and
+    twilio/call_credential.py, which verifies call_credential locally
+    before it is ever used)."""
+
+    organization_id: str
+    call_credential: str

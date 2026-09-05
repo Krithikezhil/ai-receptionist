@@ -104,22 +104,27 @@ model any real entity yet, since none exist in M1.
 
 ## 5. services/voice-agent — Voice service
 
-FastAPI, Python 3.12, managed by [uv](https://docs.astral.sh/uv/). Structure as of M6:
+FastAPI, Python 3.12, managed by [uv](https://docs.astral.sh/uv/). Structure as of M7:
 
 ```
 src/voice_agent/
   config.py       environment settings (incl. INTERNAL_SERVICE_KEY, provider/model selection,
-                  idle-timeout validation, §13)
-  routes/         FastAPI routers (URL -> handler wiring) — GET /health only, still
+                  idle-timeout validation, §13; Twilio settings, §14)
+  routes/         FastAPI routers (URL -> handler wiring) — GET /health, POST /twilio/voice +
+                  WS /twilio/media-stream (twilio.py, §14)
   services/       business logic, framework-agnostic (health)
-  clients/        typed HTTP client for apps/api's /internal/v1/* (api_client.py, models.py)
+  clients/        typed HTTP client for apps/api's /internal/v1/* (api_client.py, models.py) —
+                  incl. the service-auth-only phone-number lookup (§14)
   providers/      STT/LLM/TTS provider factory + fake/no-op doubles (§12, §13)
   tools/          read-only function-calling tools (search_knowledge.py, §12)
   runtime/        turns a fetched RuntimeContext into the LLM system prompt (context.py)
-  pipeline.py     transport-agnostic bot pipeline construction, incl. VAD (§12, §13)
+  twilio/         signature verification, call-credential verification, TwiML/URL builders (§14)
+  pipeline.py     transport-agnostic bot pipeline construction, incl. VAD (§12, §13) — unmodified
+                  by M7
   session.py      one session's lifecycle: fetch context, build pipeline, idle-timeout/
-                  error/disconnect handling, cleanup (§13)
-  logging_config.py  centralized, secret-safe logger factory (§13)
+                  error/disconnect handling, cleanup (§13) — unmodified by M7, reused as-is by
+                  the Twilio Media Stream bridge (§14)
+  logging_config.py  centralized, secret-safe logger factory (§13) — unmodified by M7
   bot.py          manual/local SmallWebRTCTransport smoke-test entry point — NOT in CI
   main.py         FastAPI app factory (create_app) + process entrypoint
 ```
@@ -574,8 +579,13 @@ Twilio/Telnyx/Plivo-related class. The only transport instantiated anywhere in M
 `SmallWebRTCTransport`, and that instantiation is confined entirely to `bot.py` (a manual,
 non-CI, local smoke-test entry point using Pipecat's own official development runner,
 `pipecat.runner.run` + `create_transport()`'s factory-dict pattern, rather than hand-rolled WebRTC
-signaling) — `pipeline.py` itself never references it. A future M7 Twilio transport is a new
-entry in that factory dict plus a new runner-args type; `pipeline.py` does not change.
+signaling) — `pipeline.py` itself never references it. This prediction turned out to be only
+half right: M7's Twilio transport (§14.4) is **not** a new entry in `create_transport()`'s
+factory dict — that dict is part of the dev-only CLI runner `bot.py` uses, and M7 needed a real,
+signature-validated public endpoint, not a dev harness. Instead, `routes/twilio.py` directly
+constructs `FastAPIWebsocketTransport` + `TwilioFrameSerializer` (both public Pipecat classes) in
+its own WebSocket route handler. `pipeline.py` was correct about the one thing that mattered:
+it, and `bot.py`'s dev flow, remain completely unchanged.
 
 **Session/runtime state is ephemeral**: a session is one `Pipeline` instance built per
 connection — `runtime-context` is fetched once at session start, folded into the LLM's system
@@ -687,9 +697,10 @@ dependency was added for M6 (`pyproject.toml`/`uv.lock` are unchanged from M5).
 ### 13.3 Session lifecycle (`session.py`)
 
 M5's `bot.py` inlined "fetch context, build pipeline, run" directly. M6 extracts that into
-`session.py`'s `run_session()`, reused by `bot.py` today and intended for a future M7 Twilio entry
-point to call the same way — `session.py` stays transport-agnostic like `pipeline.py`, never
-importing a telephony-specific class.
+`session.py`'s `run_session()`, reused by `bot.py` (dev) and, as of M7, by
+`routes/twilio.py`'s Media Stream WebSocket handler (§14.4) the same way — `session.py` stays
+transport-agnostic like `pipeline.py`, never importing a telephony-specific class, and is
+completely unmodified by M7.
 
 `run_session()` wraps a `PipelineWorker` (Pipecat's own class, used directly in `bot.py` since M5)
 and wires exactly five outcomes to Pipecat's own native mechanisms — no hand-rolled state machine:
@@ -786,3 +797,96 @@ Deepgram → OpenAI → Cartesia over `SmallWebRTCTransport`, including a real `
 invocation and observed interruption/turn-taking behavior — requires real, locally-configured
 provider API keys that were not available in the environment this milestone was implemented in.
 This is tracked explicitly in TASKS.md as outstanding, not assumed to work.
+
+## 14. Twilio Inbound Calls (M7)
+
+A real inbound phone call now reaches the exact same M6 runtime (§13), unmodified. This section
+covers the webhook/Media Stream bridge; see [SECURITY.md §10](SECURITY.md#10-twilio-inbound-call-security-m7)
+for the authoritative security summary.
+
+### 14.1 Phone-number routing (`apps/api`)
+
+`organization_phone_numbers` (`id` uuid PK, `organization_id` a plain indexed FK, `phone_number`
+unique, E.164) supports multiple numbers per organization from its first migration. Three
+owner-gated endpoints (`POST`/`GET`/`DELETE /organizations/:organizationId/phone-numbers`) let an
+organization's owner manage its own numbers; a new internal, service-auth-only endpoint
+(`GET /internal/v1/twilio/phone-numbers/:phoneNumber`) resolves a dialed number to an organization
+and mints a call credential (§14.3) in the same request — used only by voice-agent's webhook
+handler, before any organization-scoped credential exists for that call.
+
+### 14.2 Preserving the M5 service-token boundary
+
+`middleware/require-organization-service-token.ts` (§8.2 of SECURITY.md) is untouched by M7 — its
+own file and test suite have an empty diff, re-run and re-verified at every M7 step. A new,
+separate `middleware/require-organization-auth.ts` composes a call-credential check *in front of*
+it: it tries `verifyCallCredential` first, and falls through to the unmodified original middleware
+for anything that isn't a valid call credential. `tests/require-organization-auth.test.ts` proves
+this fallback path is byte-identical (status, body, `next()` call count) to calling the original
+middleware directly, for every input that isn't a valid credential. `internal.routes.ts`'s only
+change is which composed function is mounted on the two routes `session.run_session()` reaches.
+
+### 14.3 Call credential
+
+A hand-rolled, non-JWT token: `payload_b64.sig_b64`, where `payload_b64` is the unpadded
+base64url encoding of `{"organization_id", "call_sid", "exp"}` and `sig_b64` is an HMAC-SHA256
+over `payload_b64` using `TWILIO_CALL_CREDENTIAL_SECRET` — a secret independent from
+`INTERNAL_SERVICE_KEY` and from per-organization token hashes, shared only between `apps/api`
+(mints and verifies) and `services/voice-agent` (verifies only). No `alg` field and no JWT
+library — both sides hard-code exactly one algorithm, avoiding algorithm-confusion entirely and
+adding no new dependency. `apps/api/src/auth/call-credential.ts` and
+`services/voice-agent/src/voice_agent/twilio/call_credential.py` are independent implementations
+of the same algorithm, proven interoperable by a dedicated cross-language test rather than shared
+code (Python's `bool` being an `int` subclass required an explicit `isinstance(x, int) and not
+isinstance(x, bool)` guard on the `exp` claim so a boolean can't slip through a looser numeric
+check). TTL is 4 hours — deliberately generous, since the `call_sid` binding (checked against
+Twilio's own `CallSid` for the presenting connection), not the TTL, is the primary defense against
+replay across unrelated calls; `session.py`'s `ApiClient` sets its auth header once at
+construction with no mid-session re-authentication, so a short TTL would risk a long, healthy call
+losing tool access mid-conversation for no corresponding security benefit.
+
+### 14.4 Webhook and Media Stream bridge (`services/voice-agent`)
+
+`routes/twilio.py`'s `POST /twilio/voice` validates `X-Twilio-Signature` (stdlib
+`hmac`/`hashlib`/`base64`, Twilio's documented HMAC-SHA1 scheme, no `twilio` SDK dependency)
+against a canonical URL built from the operator-configured `VOICE_AGENT_PUBLIC_BASE_URL` —
+deliberately never derived from `X-Forwarded-*` headers, which aren't a trusted boundary in this
+deployment — before any other processing; an invalid or missing signature returns `403` with zero
+calls to `apps/api`. On success it looks up the dialed number, and returns TwiML pointing
+`<Connect><Stream>` at the `wss://` Media Stream URL (same `VOICE_AGENT_PUBLIC_BASE_URL`, scheme
+swapped), passing `organization_id` and `call_credential` as `<Parameter>`s.
+
+`WS /twilio/media-stream` uses `pipecat.runner.utils.parse_telephony_websocket()` to read the
+handshake, then verifies the call credential **locally** — pure HMAC, no network call, no DB —
+before constructing any Pipecat object. Only on success are `TwilioFrameSerializer` (constructed
+with `auto_hang_up=False` explicitly, since Pipecat's default of `True` requires
+`TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` this design doesn't otherwise need) and
+`FastAPIWebsocketTransport` built, and the unmodified `session.run_session()` (§13.3) called —
+exactly the call `bot.py` already makes, with the credential's own `organization_id` claim and the
+credential string itself (reused unchanged as the opaque `organization_service_token`).
+
+**Tenant identity comes only from the verified credential.** The WS handshake's own
+`organization_id` metadata parameter is read only for an observability log line and never
+influences which organization the session runs for — proven by
+`test_organization_a_credential_with_organization_b_metadata_uses_credential_org`, which sends
+`organization_id=org-B` in the metadata alongside a credential validly signed for org A and
+asserts `session.run_session` is called with org A. This is the one design point this plan
+deliberately reconsiders from the M6-era assumption in §5/§13.3's prior wording — see the notes
+there.
+
+### 14.5 What stayed frozen
+
+`session.py`, `pipeline.py`, `runtime/context.py`, `providers/factory.py`,
+`tools/search_knowledge.py`, and `logging_config.py` all have an empty diff for M7, confirmed at
+every verification step, not just at the end. The Media Stream bridge is additive: a new transport
+construction site that calls the same unmodified session orchestrator `bot.py` already used for
+its own, non-telephony local dev harness.
+
+### 14.6 Known limitations
+
+No nonce/single-use replay tracking for call credentials (bounded by the 4-hour TTL and
+`call_sid` binding instead — §14.3); no connection-rate limiting or concurrent-connection cap on
+`/twilio/media-stream` (the credential-before-any-expensive-work ordering bounds the *cost* of an
+unauthenticated attempt, not how many can happen concurrently — left to a future, infra-aware
+milestone); `auto_hang_up=False` relies on documented `<Connect><Stream>` TwiML semantics that
+have not been confirmed against a real Twilio call. A real live Twilio/PSTN call has **not** yet
+been manually verified in this environment — see TASKS.md.

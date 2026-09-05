@@ -5,27 +5,31 @@ conversations, business-specific knowledge, lead capture, appointment booking, S
 human call transfers, call transcripts/summaries, business analytics, usage tracking, and Stripe
 subscriptions.
 
-**Status: M6 — Real AI voice runtime.** None of the product features above (real phone
-calling, leads, appointments, billing, etc.) are implemented yet. This repository currently
-contains the M1 monorepo foundation, M2 authentication (real accounts, sessions), M3 organizations
-(business profile, weekly hours, service catalog), M4 (an authenticated organization member can
-manage a knowledge base and configure a provider-agnostic AI receptionist), M5 — a Pipecat
-conversational pipeline in `services/voice-agent`, a service-authenticated internal API on
-`apps/api` for it to read a tenant's config/knowledge, and one read-only knowledge-search tool —
-and M6, which wires real Deepgram/OpenAI/Cartesia providers into that pipeline, adds turn-taking
-detection, and hardens session lifecycle handling (idle timeout, provider-error handling,
-disconnect handling). Real-provider behavior has not yet been manually verified in this
-environment (no provider credentials available) — see TASKS.md.
-No Twilio, no phone numbers, no real phone calls — see [TASKS.md](TASKS.md) for exactly what
-exists today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full milestone sequence
-(M1–M15).
+**Status: M7 — Twilio inbound calls.** None of the product features above (leads,
+appointments, billing, etc.) are implemented yet. This repository currently contains the M1
+monorepo foundation, M2 authentication (real accounts, sessions), M3 organizations (business
+profile, weekly hours, service catalog), M4 (an authenticated organization member can manage a
+knowledge base and configure a provider-agnostic AI receptionist), M5 — a Pipecat conversational
+pipeline in `services/voice-agent`, a service-authenticated internal API on `apps/api` for it to
+read a tenant's config/knowledge, and one read-only knowledge-search tool — M6, which wires real
+Deepgram/OpenAI/Cartesia providers into that pipeline, adds turn-taking detection, and hardens
+session lifecycle handling (idle timeout, provider-error handling, disconnect handling), and M7,
+which bridges a real inbound Twilio phone call into that exact runtime via a signature-validated
+webhook and a credential-authenticated Media Stream WebSocket. Real-provider behavior (M6) and a
+real live Twilio/PSTN call (M7) have **not** yet been manually verified in this environment (no
+provider or Twilio credentials available) — see TASKS.md.
+No SMS, no outbound calling, no leads, no appointments, no billing — see [TASKS.md](TASKS.md) for
+exactly what exists today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full
+milestone sequence (M1–M15).
 
 ## Architecture (high level)
 
 ```
 apps/web            Next.js + TypeScript + Tailwind — customer-facing frontend
-apps/api             Express + TypeScript — backend API, incl. /internal/v1 (M5)
-services/voice-agent  FastAPI + Pipecat (Python) — voice service, no telephony yet
+apps/api             Express + TypeScript — backend API, incl. /internal/v1 (M5) and Twilio
+                     phone-number lookup/provisioning (M7)
+services/voice-agent  FastAPI + Pipecat (Python) — voice service, incl. Twilio inbound call
+                     webhook + Media Stream bridge (M7); no outbound calling, no SMS
 packages/shared       TypeScript types shared by web + api
 infrastructure/docker  docker-compose for local Postgres + Redis
 ```
@@ -73,6 +77,16 @@ handling via Pipecat's own termination policy, client-disconnect handling, and g
 call. Real-provider behavior (an actual live conversation) has not yet been manually verified in
 this environment. Full design: [ARCHITECTURE.md §13](ARCHITECTURE.md#13-real-ai-voice-runtime-m6),
 [SECURITY.md §9](SECURITY.md#9-voice-runtime-session-lifecycle-and-failure-handling-m6).
+
+**Twilio inbound calls** (M7): a real inbound phone call now reaches the exact same M6 runtime,
+unmodified. `apps/api` maps a dialed Twilio number to an organization and mints a short-lived,
+call-bound credential; `services/voice-agent` validates the Twilio webhook signature, bridges the
+Media Stream WebSocket into the pipeline, and verifies that credential locally before starting a
+session — the credential, never a raw WebSocket parameter, is the sole source of tenant identity.
+No SMS, no outbound calling. An actual live call over real Twilio + real providers has **not** yet
+been manually verified in this environment. Full design:
+[ARCHITECTURE.md §14](ARCHITECTURE.md#14-twilio-inbound-calls-m7),
+[SECURITY.md §10](SECURITY.md#10-twilio-inbound-call-security-m7).
 
 ## Prerequisites
 
@@ -132,11 +146,16 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
   receptionist configuration, and now a voice-agent pipeline exist as of M5; nothing beyond that.
 * No fine-grained RBAC — any organization member (owner or plain member) currently has full
   read/write access to that organization's configuration. See [SECURITY.md](SECURITY.md).
-* No Twilio, no phone calls, no phone numbers, no SIP, no production WebRTC, no Stripe, no
-  Google Calendar, no SMS, no RAG/vector database/embeddings. See
+* No SIP, no production WebRTC infrastructure, no Stripe, no Google Calendar, no SMS, no
+  outbound calling, no RAG/vector database/embeddings. See
   [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for when each lands. The receptionist
   configuration is provider-agnostic and always created disabled — enabling it in the UI does not
-  connect to any AI provider or phone number.
+  connect to any AI provider or phone number by itself (a phone number must also be separately
+  provisioned to an organization, M7).
+* Twilio inbound calling exists structurally (M7: webhook signature validation, phone-number
+  lookup, call-credential-authenticated Media Stream bridge, reusing the unmodified M6 runtime)
+  but **a real live call has not yet been manually verified** in this environment — no real
+  Twilio account was available during implementation. See [TASKS.md](TASKS.md).
 * Real STT/LLM/TTS provider wiring exists (M5) but is optional and lazy — a deterministic fake is
   the default, and no automated test or CI step ever makes a real, paid provider call. A developer
   can talk to the bot for real, locally, over a browser (no telephony) with real keys configured —
@@ -163,6 +182,6 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 
 ## Future milestones
 
-M7 Twilio inbound calls · M8 Knowledge retrieval/RAG · M9 Lead capture · M10 Appointment booking ·
-M11 SMS · M12 Dashboard · M13 Stripe billing · M14 Security and testing · M15 Production
-deployment. Details: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+M8 Knowledge retrieval/RAG · M9 Lead capture · M10 Appointment booking · M11 SMS · M12 Dashboard ·
+M13 Stripe billing · M14 Security and testing · M15 Production deployment. Details:
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).

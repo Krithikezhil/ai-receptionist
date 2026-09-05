@@ -1,9 +1,13 @@
 # Deployment
 
-Status: **M6 — Real AI voice runtime. Nothing in this repository is deployed anywhere.**
+Status: **M7 — Twilio inbound calls. Nothing in this repository is deployed anywhere.**
 Production deployment is milestone **M15** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This document currently covers local
-development only, plus the Docker/Postgres limitation for this environment.
+development only, plus the Docker/Postgres limitation for this environment. M7 additionally
+requires two real public URLs once actually deployed (services/voice-agent's Twilio webhook and
+Media Stream WebSocket, both served from the same `VOICE_AGENT_PUBLIC_BASE_URL`) — no production
+topology for exposing them exists yet; see [services/voice-agent/README.md](services/voice-agent/README.md)
+for the local/ngrok-based manual test setup used instead.
 
 ## Local development
 

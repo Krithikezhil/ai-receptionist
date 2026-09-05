@@ -1,11 +1,11 @@
 # Security
 
-Status: **M5 — Voice/AI runtime foundation**, building on M1–M4. This document covers (a) the
+Status: **M7 — Twilio inbound calls**, building on M1–M6. This document covers (a) the
 multi-tenant isolation strategy and what actually enforces it, (b) the authentication/session
-security design, (c) the M5 service-to-service authentication design (§8), and (d) the security
-posture of what actually exists today. Full security hardening/testing is milestone **M14** in
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps growing with each milestone
-that adds real attack surface (payment handling in M13, etc.).
+security design, (c) the M5 service-to-service authentication design and its M7 extension (§8,
+§10), and (d) the security posture of what actually exists today. Full security hardening/testing
+is milestone **M14** in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps
+growing with each milestone that adds real attack surface (payment handling in M13, etc.).
 
 ## 1. Multi-tenant isolation
 
@@ -495,3 +495,56 @@ is the authoritative security summary for `session.py`'s lifecycle handling.
   no effect on which organization is queried — re-verified by a dedicated test in M6.
 * **What did not change**: the M5 two-credential model (§8) and the "voice-agent never touches
   Postgres directly" boundary are untouched by this milestone.
+
+## 10. Twilio inbound call security (M7)
+
+Design rationale lives in [ARCHITECTURE.md §14](ARCHITECTURE.md#14-twilio-inbound-calls-m7). This
+is the authoritative security summary.
+
+* **Webhook signature validation is the first thing that happens**, before any organization
+  lookup: `X-Twilio-Signature` is verified (stdlib HMAC-SHA1, Twilio's documented scheme) against
+  a canonical URL built from the operator-configured `VOICE_AGENT_PUBLIC_BASE_URL` — never from
+  `X-Forwarded-*` headers, which are attacker-settable on any request that reaches this deployment
+  directly. An invalid or missing signature returns `403` with zero calls to `apps/api`, verified
+  by a test asserting the call count, not just the response code.
+* **Tenant identity comes only from the verified call credential, never from the WebSocket's own
+  metadata.** The `organization_id` `<Parameter>` sent alongside the credential in TwiML is read
+  only for an observability log line; a dedicated adversarial test proves that a credential
+  validly signed for organization A, presented alongside metadata claiming organization B, results
+  in the session running as organization A.
+* **The call credential is a hand-rolled, non-JWT HMAC-SHA256 token** (§14.3 of ARCHITECTURE.md),
+  bound to a specific `organization_id` and Twilio `call_sid`, with a 4-hour TTL. It is verified
+  with a timing-safe comparison on both sides (`crypto.timingSafeEqual` in Node,
+  `hmac.compare_digest` in Python). `TWILIO_CALL_CREDENTIAL_SECRET` is independent from
+  `INTERNAL_SERVICE_KEY` and from per-organization token hashes — compromise of one does not
+  compromise the others.
+* **The M5 two-credential model (§8) is extended by composition, not modification.**
+  `require-organization-service-token.ts` has an empty diff for M7, re-verified by its own
+  existing test suite passing unmodified. The new `require-organization-auth.ts` middleware tries
+  the call credential first and falls through to the exact same, unmodified original function for
+  anything else — proven byte-identical to calling that original function directly, for every
+  input that isn't a valid call credential.
+* **WebSocket authentication, precisely stated**: any client can complete the WS handshake to
+  `/twilio/media-stream` — that is unavoidable at the transport level and is not claimed
+  otherwise. What matters is what happens *before* any expensive work: the call credential is
+  verified locally (pure HMAC, no network, no DB) before any Pipecat object
+  (`TwilioFrameSerializer`, `FastAPIWebsocketTransport`) is constructed. An unauthenticated
+  connection attempt costs at most one WS handshake, two small JSON message reads, and one HMAC
+  computation — `session.run_session()`, and everything downstream of it (provider clients,
+  `apps/api` calls), is never reached without a valid, call-bound credential.
+* **Malformed/tampered/expired credentials are one outcome: rejected.** No partial trust and no
+  distinguishing detail is returned to the caller or logged beyond a generic reason string
+  (`"malformed"`/`"signature"`/`"expired"`/`"org_mismatch"`/`"call_mismatch"`) — never the token or
+  payload contents themselves.
+* **Known, accepted limitations** (not silently omitted): no nonce/single-use replay tracking for
+  call credentials, bounded instead by the 4-hour TTL and `call_sid` binding; no
+  connection-rate limiting or concurrent-connection cap on `/twilio/media-stream`, left to a
+  future infra-aware milestone (a reverse proxy/load balancer in front of a real deployment, not
+  application code here); `auto_hang_up=False` relies on documented `<Connect><Stream>` semantics
+  unverified against a real Twilio call.
+* **What did not change**: the M5 two-credential model's own files (§8.1/§8.2), the
+  multi-tenant isolation strategy (§1), and `session.py`'s lifecycle handling (§9) are all
+  untouched by this milestone.
+* **Not yet performed**: a real live Twilio/PSTN call, in this or any environment — no real Twilio
+  account was available during implementation. Structural/unit verification only. Tracked as
+  outstanding in TASKS.md, never assumed to work.
