@@ -5,16 +5,20 @@ conversations, business-specific knowledge, lead capture, appointment booking, S
 human call transfers, call transcripts/summaries, business analytics, usage tracking, and Stripe
 subscriptions.
 
-**Status: M5 — Voice/AI runtime foundation.** None of the product features above (real phone
+**Status: M6 — Real AI voice runtime.** None of the product features above (real phone
 calling, leads, appointments, billing, etc.) are implemented yet. This repository currently
 contains the M1 monorepo foundation, M2 authentication (real accounts, sessions), M3 organizations
 (business profile, weekly hours, service catalog), M4 (an authenticated organization member can
-manage a knowledge base and configure a provider-agnostic AI receptionist), and M5 — a Pipecat
+manage a knowledge base and configure a provider-agnostic AI receptionist), M5 — a Pipecat
 conversational pipeline in `services/voice-agent`, a service-authenticated internal API on
-`apps/api` for it to read a tenant's config/knowledge, and one read-only knowledge-search tool.
+`apps/api` for it to read a tenant's config/knowledge, and one read-only knowledge-search tool —
+and M6, which wires real Deepgram/OpenAI/Cartesia providers into that pipeline, adds turn-taking
+detection, and hardens session lifecycle handling (idle timeout, provider-error handling,
+disconnect handling). Real-provider behavior has not yet been manually verified in this
+environment (no provider credentials available) — see TASKS.md.
 No Twilio, no phone numbers, no real phone calls — see [TASKS.md](TASKS.md) for exactly what
 exists today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full milestone sequence
-(M1–M14).
+(M1–M15).
 
 ## Architecture (high level)
 
@@ -59,6 +63,16 @@ config/knowledge without a browser session. **No telephony**: the only transport
 manual, local-only WebRTC smoke test — no Twilio, no phone numbers, no real calls. Full design:
 [ARCHITECTURE.md §12](ARCHITECTURE.md#12-voiceai-runtime-foundation-m5),
 [SECURITY.md §8](SECURITY.md#8-service-to-service-authentication-m5).
+
+**Real AI voice runtime** (M6): real Deepgram (STT), OpenAI (LLM), and Cartesia (TTS) providers
+are now wired in with model/voice configuration, plus a turn-taking/interruption detection stage
+(a local VAD model — no network, no credentials). Session execution is now production-shaped: an
+idle-timeout that ends a call gracefully after configurable caller silence, provider-failure
+handling via Pipecat's own termination policy, client-disconnect handling, and guaranteed cleanup
+— all still reached only through the same non-telephony local WebRTC smoke test, never a phone
+call. Real-provider behavior (an actual live conversation) has not yet been manually verified in
+this environment. Full design: [ARCHITECTURE.md §13](ARCHITECTURE.md#13-real-ai-voice-runtime-m6),
+[SECURITY.md §9](SECURITY.md#9-voice-runtime-session-lifecycle-and-failure-handling-m6).
 
 ## Prerequisites
 
@@ -149,6 +163,6 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 
 ## Future milestones
 
-M6 Twilio inbound calls · M7 Knowledge retrieval/RAG · M8 Lead capture · M9 Appointment booking ·
-M10 SMS · M11 Dashboard · M12 Stripe billing · M13 Security and testing · M14 Production
+M7 Twilio inbound calls · M8 Knowledge retrieval/RAG · M9 Lead capture · M10 Appointment booking ·
+M11 SMS · M12 Dashboard · M13 Stripe billing · M14 Security and testing · M15 Production
 deployment. Details: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).

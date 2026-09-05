@@ -1,7 +1,7 @@
 # Deployment
 
-Status: **M5 — Voice/AI runtime foundation. Nothing in this repository is deployed anywhere.**
-Production deployment is milestone **M14** in
+Status: **M6 — Real AI voice runtime. Nothing in this repository is deployed anywhere.**
+Production deployment is milestone **M15** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This document currently covers local
 development only, plus the Docker/Postgres limitation for this environment.
 
@@ -80,5 +80,5 @@ repository inspection, and remained unavailable through M2. As a result:
 ## Production deployment
 
 Not designed yet. Target platform(s), CI/CD pipeline, container registry, secrets management,
-and environment topology (staging/prod) are all open decisions deferred to M14, once there is a
+and environment topology (staging/prod) are all open decisions deferred to M15, once there is a
 real product to deploy. Nothing here should be read as a decision already made.

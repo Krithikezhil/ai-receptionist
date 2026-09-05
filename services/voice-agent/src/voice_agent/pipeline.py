@@ -14,9 +14,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.services.llm_service import LLMService
 from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
@@ -58,6 +60,11 @@ def build_pipeline(
     return Pipeline(
         [
             transport.input(),
+            # Real-time turn-taking/interruption detection. A local ONNX
+            # model (no network, no provider credentials) — see
+            # providers/factory.py for why STT/LLM/TTS stay separately
+            # provider-selectable while VAD does not need to be.
+            VADProcessor(vad_analyzer=SileroVADAnalyzer()),
             stt,
             context_aggregator.user(),
             llm,

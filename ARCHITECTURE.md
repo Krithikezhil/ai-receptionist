@@ -104,18 +104,22 @@ model any real entity yet, since none exist in M1.
 
 ## 5. services/voice-agent — Voice service
 
-FastAPI, Python 3.12, managed by [uv](https://docs.astral.sh/uv/). Structure as of M5:
+FastAPI, Python 3.12, managed by [uv](https://docs.astral.sh/uv/). Structure as of M6:
 
 ```
 src/voice_agent/
-  config.py       environment settings (incl. INTERNAL_SERVICE_KEY, provider selection)
+  config.py       environment settings (incl. INTERNAL_SERVICE_KEY, provider/model selection,
+                  idle-timeout validation, §13)
   routes/         FastAPI routers (URL -> handler wiring) — GET /health only, still
   services/       business logic, framework-agnostic (health)
   clients/        typed HTTP client for apps/api's /internal/v1/* (api_client.py, models.py)
-  providers/      STT/LLM/TTS provider factory + fake/no-op doubles (§12)
+  providers/      STT/LLM/TTS provider factory + fake/no-op doubles (§12, §13)
   tools/          read-only function-calling tools (search_knowledge.py, §12)
   runtime/        turns a fetched RuntimeContext into the LLM system prompt (context.py)
-  pipeline.py     transport-agnostic bot pipeline construction (§12)
+  pipeline.py     transport-agnostic bot pipeline construction, incl. VAD (§12, §13)
+  session.py      one session's lifecycle: fetch context, build pipeline, idle-timeout/
+                  error/disconnect handling, cleanup (§13)
+  logging_config.py  centralized, secret-safe logger factory (§13)
   bot.py          manual/local SmallWebRTCTransport smoke-test entry point — NOT in CI
   main.py         FastAPI app factory (create_app) + process entrypoint
 ```
@@ -430,7 +434,7 @@ match the existing single-file-of-org-scoped-fetchers convention).
 M5's goal: give the Python voice-agent a secure way to read a tenant's configuration/knowledge,
 and give it a Pipecat-based conversational pipeline built on that data — **not** to place or
 receive a real phone call. No Twilio, no PSTN, no phone numbers, no SMS anywhere in this
-milestone; that is M6. Full test coverage and known limitations live in
+milestone; that is M7. Full test coverage and known limitations live in
 [TASKS.md](TASKS.md)/[SECURITY.md](SECURITY.md); this section covers the design.
 
 ### 12.1 Internal voice API
@@ -570,7 +574,7 @@ Twilio/Telnyx/Plivo-related class. The only transport instantiated anywhere in M
 `SmallWebRTCTransport`, and that instantiation is confined entirely to `bot.py` (a manual,
 non-CI, local smoke-test entry point using Pipecat's own official development runner,
 `pipecat.runner.run` + `create_transport()`'s factory-dict pattern, rather than hand-rolled WebRTC
-signaling) — `pipeline.py` itself never references it. A future M6 Twilio transport is a new
+signaling) — `pipeline.py` itself never references it. A future M7 Twilio transport is a new
 entry in that factory dict plus a new runner-args type; `pipeline.py` does not change.
 
 **Session/runtime state is ephemeral**: a session is one `Pipeline` instance built per
@@ -649,3 +653,136 @@ M1–M4 already established (`build-test-app.ts` on the Node side), extended to 
 
 No test requires Postgres, Docker, a real STT/LLM/TTS provider, a microphone, a browser, a
 WebSocket, or a phone call.
+
+## 13. Real AI Voice Runtime (M6)
+
+M5 built the pipeline's *shape*; M6 makes it capable of an actual conversation with real
+providers and handles a real session's lifecycle correctly (turn-taking, silence, provider
+failure, disconnect) — reached only through the same non-telephony `SmallWebRTCTransport` dev
+harness M5 already built. No new public entry point, no phone number, no Twilio (that stays M7).
+
+### 13.1 Real provider configuration
+
+`providers/factory.py`'s `create_stt_service`/`create_llm_service` accept an optional `model`
+keyword, threaded from new `Settings` fields:
+
+* `DEEPGRAM_MODEL` (default `"nova-3-general"`, Deepgram's own SDK default), passed via
+  `settings=DeepgramSTTService.Settings(model=...)`.
+* `OPENAI_MODEL` (default `"gpt-4.1"`, `OpenAILLMService`'s own documented default), passed via
+  its `model=` keyword.
+* `CARTESIA_VOICE_ID` — required (`_require_env`), matching `CARTESIA_API_KEY`'s existing
+  treatment. Cartesia has no default voice id (voice ids are per-account), so a missing value
+  fails closed with a `ProviderConfigurationError` at construction time rather than silently
+  passing no voice to the SDK.
+
+### 13.2 Turn-taking (VAD)
+
+`pipeline.py` adds `VADProcessor(vad_analyzer=SileroVADAnalyzer())`
+(`pipecat.processors.audio.vad_processor`, `pipecat.audio.vad.silero`) to the `Pipeline([...])`
+list, immediately after `transport.input()`. VAD is implemented as a **pipeline processor
+stage**, not a transport parameter. `SileroVADAnalyzer` is a local ONNX model; its dependencies
+(`onnxruntime`, `numba`) are already part of the base `pipecat-ai` dependency tree — no new
+dependency was added for M6 (`pyproject.toml`/`uv.lock` are unchanged from M5).
+
+### 13.3 Session lifecycle (`session.py`)
+
+M5's `bot.py` inlined "fetch context, build pipeline, run" directly. M6 extracts that into
+`session.py`'s `run_session()`, reused by `bot.py` today and intended for a future M7 Twilio entry
+point to call the same way — `session.py` stays transport-agnostic like `pipeline.py`, never
+importing a telephony-specific class.
+
+`run_session()` wraps a `PipelineWorker` (Pipecat's own class, used directly in `bot.py` since M5)
+and wires exactly five outcomes to Pipecat's own native mechanisms — no hand-rolled state machine:
+
+| Outcome | Mechanism |
+|---|---|
+| Normal completion | `on_pipeline_finished` (Pipecat's own event) |
+| Idle timeout | `PipelineWorker(idle_timeout_secs=<VOICE_AGENT_IDLE_TIMEOUT_SECS>, idle_timeout_frames=(UserSpeakingFrame,), cancel_on_idle_timeout=False)` + `on_idle_timeout` |
+| Provider/pipeline failure | `processor_unusable_policy=ProcessorUnusablePolicy.END` + `on_pipeline_error` (log only) |
+| Tool failure | Unchanged since M5 — `search_knowledge`'s handler already catches and returns a structured error |
+| Client disconnect | The transport's own `on_client_disconnected` event → `worker.cancel(...)` |
+
+**Idle timeout**: Pipecat's `PipelineWorker` runs an internal monitor loop that waits, on a fixed
+`idle_timeout_secs` interval, for a frame instance of one of `idle_timeout_frames` (or the initial
+`StartFrame`) to have passed through the pipeline; if none arrived in that interval, it fires
+`on_idle_timeout` and — since `cancel_on_idle_timeout=False` here — keeps monitoring rather than
+cancelling automatically. `idle_timeout_frames` is narrowed to `(UserSpeakingFrame,)` only — the
+library's default also includes `BotSpeakingFrame`, which would treat the bot's own speech as
+"activity" and never time out a session where the bot keeps talking but the caller never responds.
+This keeps the timeout tied specifically to caller silence (configurable via
+`VOICE_AGENT_IDLE_TIMEOUT_SECS`, default 45s, validated at startup — a malformed or non-positive
+value raises `ConfigurationError` rather than silently falling back), and distinct from any
+overall session-duration cap (not built — no requirement calls for one). On `on_idle_timeout`,
+`session.py` queues one `TTSSpeakFrame` with the receptionist's existing `fallbackMessage` (no new
+`apps/api`/receptionist-config field), then calls `worker.end(reason="idle_timeout")` — `end()`
+drains the pipeline (lets the queued speech play) before finishing, as opposed to `cancel()`, which
+would abandon it. `session.py` guards against a second firing with a simple idempotency flag
+— Pipecat's idle-timeout monitor loop re-arms itself on a fixed interval regardless of whether
+the first `end()` call has finished tearing the session down, so without a guard a very short
+configured timeout combined with a slow-draining transport could in principle invoke the
+handler a second time before the first one finishes. The guard makes a second firing a safe
+no-op — logged, but no second `TTSSpeakFrame` queued and no second `worker.end()` call —
+verified directly by a dedicated test (`test_session.py`), not just reasoned about from reading
+Pipecat's source. See SECURITY.md §9.
+
+**Provider/pipeline failure**: `processor_unusable_policy=ProcessorUnusablePolicy.END` tells
+Pipecat itself to end the session gracefully when a processor (e.g. a provider SDK) becomes
+unusable, rather than the default `CONTINUE` (which would keep reporting errors indefinitely with
+nothing to fall back to). `session.py`'s `on_pipeline_error` handler does not itself call
+`end`/`cancel` and does not retry — termination is Pipecat's own responsibility, driven by the
+policy; the handler's only job is logging safe, structural metadata (see §13.4).
+
+**Client disconnect**: `transport.add_event_handler("on_client_disconnected", ...)` is registered
+unconditionally on whatever `BaseTransport` is passed in. Registering a handler for an event name a
+given transport never emits is a no-op (a warning, not an exception), so this stays safe for a
+future transport that names its disconnect event differently. On disconnect, `session.py` calls
+`worker.cancel(reason="client_disconnected")` — not `end()`, since draining audio for a peer that
+is already gone serves no purpose.
+
+**Cleanup**: `session.py` has no separate `_cleanup()`/close helper of its own. It relies entirely
+on `async with api_client:` (`ApiClient`'s own async-context-manager protocol, unchanged since M5)
+to guarantee `ApiClient.close()` runs exactly once on every exit path — an early return before any
+pipeline exists (e.g. `get_runtime_context` failing), or an exception propagating out of
+`runner.run()`.
+
+**Tenant binding, unchanged**: `organization_id` is resolved once, at the top of `run_session()`,
+from the caller-supplied session configuration — never re-derived from conversation text, LLM
+output, or tool-call arguments. `tools/search_knowledge.py`'s handler only ever reads
+`query`/`category` from tool arguments; a spoofed `organizationId`/`organization_id` supplied
+alongside them has no effect — see §12.3's tenant-scoping discussion for the equivalent property
+on the `apps/api` side.
+
+### 13.4 Logging (`logging_config.py`)
+
+A single stdlib `logging.Logger` factory — `session.py` is the only module that calls it and emits
+log records. Its module docstring documents a reviewed never-log list (API keys, service tokens,
+`Authorization`/`X-Organization-Service-Token` header values, conversation/transcript content,
+tool arguments/results, raw request/response bodies, and raw exception text/args that might embed
+any of the above) — enforced by discipline at that one call site, **not** by automatic scanning or
+redaction; this is a reviewed contract, the same way this codebase already treats `apps/api`'s
+pino redaction as a maintained list rather than an automatic guarantee. Safe to log: a
+locally-generated session id, organization id, provider names, event/reason, duration, and an
+exception's class name only (never its message). No logging call site existed anywhere in
+`services/voice-agent/src` before this milestone.
+
+### 13.5 Testing strategy
+
+`tests/test_session.py` and `tests/test_config.py` (both new), plus extensions to
+`tests/test_providers.py`, `tests/test_build_pipeline.py`, and
+`tests/test_search_knowledge_tool.py` — all fakes/mocks only, zero real provider credentials,
+matching M5's CI-safety principle exactly. `PipelineWorker`/`WorkerRunner` are replaced with small
+recording stand-ins in `test_session.py` rather than run for real: running the real classes
+against a bare fake transport with no real audio sink takes many seconds to drain and cancel —
+that delay is Pipecat's own internal timing, not something session.py's own wiring tests need to
+pay for or re-verify. These tests confirm `session.py`'s own wiring (which config is passed to
+`PipelineWorker`, which handlers get registered, what each one does when invoked directly) — they
+do not exercise Pipecat's real idle-timeout monitor loop or real frame draining end-to-end.
+Genuine end-to-end timing is exercised by the manual real-provider smoke test instead (§13.6).
+
+### 13.6 Real-provider manual verification (not yet performed)
+
+Structural/unit verification is complete and CI-enforced; an actual live conversation — real
+Deepgram → OpenAI → Cartesia over `SmallWebRTCTransport`, including a real `search_knowledge`
+invocation and observed interruption/turn-taking behavior — requires real, locally-configured
+provider API keys that were not available in the environment this milestone was implemented in.
+This is tracked explicitly in TASKS.md as outstanding, not assumed to work.

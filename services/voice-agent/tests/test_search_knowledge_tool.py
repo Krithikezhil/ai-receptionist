@@ -121,3 +121,55 @@ async def test_handler_ignores_a_blank_query_and_only_applies_category() -> None
         await schema.handler(params)
 
     assert seen == {"category": "policy"}
+
+
+@pytest.mark.asyncio
+async def test_handler_ignores_a_spoofed_organization_id_in_arguments() -> None:
+    """A malicious/unexpected organizationId (or organization_id) in the
+    tool-call arguments must never redirect the query to a different
+    organization — organization_id is bound once, when the schema is built
+    (see pipeline.py), never read from the LLM-controlled arguments dict.
+    Both key spellings are planted at once so this proves neither is read,
+    not just that one specific spelling is ignored."""
+    seen_paths: list[str] = []
+
+    def handler_fn(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={"knowledge": []})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler_fn)
+    ) as api_client:
+        schema = build_search_knowledge_schema(api_client, ORG_ID)
+        assert schema.handler is not None
+        params, _ = _make_params(
+            {
+                "query": "parking",
+                "organizationId": "22222222-2222-2222-2222-222222222222",
+                "organization_id": "33333333-3333-3333-3333-333333333333",
+            }
+        )
+        await schema.handler(params)
+
+    assert seen_paths == [f"/internal/v1/organizations/{ORG_ID}/knowledge"]
+
+
+@pytest.mark.asyncio
+async def test_handler_returns_an_empty_results_list_when_nothing_matches() -> None:
+    """A query with no matching knowledge entries must come back as an
+    honest, empty result — never fabricated content — so the LLM has a
+    clear, truthful signal to say it doesn't know rather than invent an
+    answer (see runtime/context.py's honesty guardrails)."""
+
+    async with ApiClient(
+        "http://internal-api.test",
+        "test-key",
+        ORG_TOKEN,
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"knowledge": []})),
+    ) as api_client:
+        schema = build_search_knowledge_schema(api_client, ORG_ID)
+        assert schema.handler is not None
+        params, results = _make_params({"query": "do you offer underwater basket weaving"})
+        await schema.handler(params)
+
+    assert results == [{"results": []}]

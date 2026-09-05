@@ -603,14 +603,14 @@ None identified as blocking M4's stated scope. Explicitly out of scope by the br
 
 None identified as blocking M5's stated scope. Explicitly out of scope by the brief itself:
 
-- [ ] Twilio, phone numbers, PSTN, inbound/outbound calling, SIP — M6.
+- [ ] Twilio, phone numbers, PSTN, inbound/outbound calling, SIP — M7.
 - [ ] Real, always-on provider calls as part of CI/automated verification — M5's definition of
       done is the abstraction plus optional lazy real-provider wiring, verified via fakes; a live
       paid smoke test against real OpenAI/Deepgram/Cartesia is a manual/local step only.
 - [ ] Credential rotation/reissue tooling for either service credential (the global
       `INTERNAL_SERVICE_KEY` or a per-organization `X-Organization-Service-Token`) — both are
       manual-only in M5; deferred until a real rotation requirement exists.
-- [ ] Rate limiting on `/internal/v1/...` — same pre-existing gap as `/auth/*`, tracked for M13.
+- [ ] Rate limiting on `/internal/v1/...` — same pre-existing gap as `/auth/*`, tracked for M14.
 - [ ] Hours/services as separate function-calling tools — deliberately deferred, easy to add later.
 
 ## Known limitations (M5 additions)
@@ -627,8 +627,145 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
   call/transcript persistence (out of scope per the brief); a prompt built from
   `runtime-context` can go stale if the underlying config changes mid-call.
 - **No telephony transport of any kind** — `SmallWebRTCTransport` (manual/local only) is the only
-  transport ever instantiated; Twilio/Telnyx/Plivo arrive in M6.
+  transport ever instantiated; Twilio/Telnyx/Plivo arrive in M7.
+
+## Completed — M6 Real AI Voice Runtime
+
+**Provider hardening**
+- [x] `DEEPGRAM_MODEL` (default `nova-3-general`, Deepgram's own SDK default) and `OPENAI_MODEL`
+      (default `gpt-4.1`, `OpenAILLMService`'s own documented default) — both configurable,
+      confirmed against the installed `pipecat-ai==1.8.1` source before being wired in
+- [x] `CARTESIA_VOICE_ID` changed from optional to required (`_require_env`) — no default voice id
+      exists (voice ids are per-account); a missing value now fails closed with a clear
+      `ProviderConfigurationError` at construction time
+
+**Turn-taking / VAD**
+- [x] `VADProcessor(vad_analyzer=SileroVADAnalyzer())` added to `pipeline.py`'s `Pipeline([...])`,
+      right after `transport.input()` — VAD is a pipeline processor stage in the installed Pipecat
+      version, not a transport parameter; local ONNX model, no network call, no provider
+      credentials. `onnxruntime`/`numba` (Silero's dependencies) are already part of the base
+      `pipecat-ai` dependency tree — confirmed via `uv tree`; `pyproject.toml`/`uv.lock` are
+      unchanged from M5, no new dependency was added
+
+**Session lifecycle (`session.py`, new)**
+- [x] Orchestration extracted from `bot.py`: fetch `RuntimeContext` → build real/fake providers →
+      `build_pipeline()` → run via `PipelineWorker`/`WorkerRunner` → guaranteed cleanup
+- [x] Idle timeout: `PipelineWorker(idle_timeout_secs=<VOICE_AGENT_IDLE_TIMEOUT_SECS, default 45>,
+      idle_timeout_frames=(UserSpeakingFrame,), cancel_on_idle_timeout=False)` — narrowed to actual
+      caller speech only, distinct from any overall session-duration cap (not built). On
+      `on_idle_timeout`: speaks the existing `receptionistConfig.fallbackMessage` once, then ends
+      gracefully — no new receptionist-config field, no `apps/api` change. The handler itself has
+      no retry logic; Pipecat's own idle-monitor loop re-arms on a fixed interval independently of
+      `session.py` (read directly from `pipeline/worker.py`'s `_idle_monitor_handler`), which is
+      not separately exercised by the fakes-only test suite — see "Known limitations" below
+- [x] Provider/pipeline failure: `processor_unusable_policy=ProcessorUnusablePolicy.END` —
+      `_on_pipeline_error` logs only safe structural metadata (processor class name, exception
+      class name, error category) and never calls `end`/`cancel` itself; termination is Pipecat's
+      own responsibility
+- [x] Client disconnect: `transport.add_event_handler("on_client_disconnected", ...)` cancels
+      (never ends); safe to register unconditionally on any `BaseTransport` since an unregistered
+      event name is a no-op, not a crash
+- [x] Cleanup relies entirely on `async with api_client:` (no separate `_cleanup()` method) —
+      verified by tests wrapping the real `ApiClient.close` and asserting it runs exactly once on
+      every path (fail-fast before a pipeline exists, and after a full session)
+- [x] Tenant binding unchanged and re-verified: `organization_id` is resolved once at the top of
+      `run_session()` and never re-derived from conversation/tool-call content — a dedicated test
+      proves a spoofed `organizationId`/`organization_id` in tool arguments cannot redirect
+      `search_knowledge` to a different organization; a second dedicated test runs two full
+      sessions for two different organizations (genuinely distinct mocked data — different id,
+      business name, fallback message, service token) and proves neither session's runtime
+      context/fallback ever leaks into the other
+- [x] Idle-timeout idempotency guard: a second `on_idle_timeout` firing (Pipecat's monitor loop
+      re-arms on a fixed interval regardless of whether the first `end()` call finished) is now a
+      safe no-op — no second fallback message, no second `end()` call — verified by a dedicated
+      test; this closes the gap previously listed under "Known limitations" below
+- [x] Session start now logs which business the session is running for (the organization's own
+      configured business name — public-facing content, not caller data; added to
+      `logging_config.py`'s documented safe-to-log list explicitly, not left implicit)
+- [x] `bot.py` now fails closed on a missing `INTERNAL_SERVICE_KEY` at startup, matching the
+      existing pattern for the two `DEV_SESSION_*` variables, instead of only surfacing as a
+      logged error deep inside `session.py`
+
+**Logging (`logging_config.py`, new)**
+- [x] One centralized stdlib `logging.Logger` factory; a documented never-log list (API keys,
+      service tokens, `Authorization`/`X-Organization-Service-Token` header values,
+      conversation/transcript content, tool arguments/results, raw request/response bodies, raw
+      exception text) enforced by discipline at the single call site (`session.py`), not by
+      automatic scanning
+- [x] No logging call site existed anywhere in `services/voice-agent/src` before this milestone —
+      a clean slate, no drift to fix
+
+**Tests**
+- [x] `tests/test_session.py` (new, 8 tests): missing organization token, runtime-context fetch
+      failure, provider-configuration failure (each closes `ApiClient` exactly once and never
+      builds a pipeline); normal session builds `PipelineWorker` with the correct idle-timeout/
+      unusable-policy configuration; idle timeout speaks the fallback exactly once and ends without
+      looping; pipeline-error handler relies on the `END` policy without terminating itself or
+      looping on a second error; pipeline-error handler never logs raw error/exception text (a
+      planted secret string asserted absent from captured logs); client disconnect cancels rather
+      than ends. `PipelineWorker`/`WorkerRunner` are replaced with small recording stand-ins so
+      these run in milliseconds and verify this service's own wiring, not Pipecat's own
+      frame-draining/idle-monitor timing
+- [x] `tests/test_config.py` (new, 9 tests): `VOICE_AGENT_IDLE_TIMEOUT_SECS` default/override/
+      malformed/non-positive validation; `DEEPGRAM_MODEL`/`OPENAI_MODEL` default/override
+- [x] `tests/test_providers.py` extended (+6 tests): Deepgram/OpenAI construct correctly with and
+      without an explicit model; Cartesia fails closed without `CARTESIA_VOICE_ID` even with a
+      valid API key, and constructs correctly with both
+- [x] `tests/test_build_pipeline.py` extended (+1 test): `VADProcessor` present in the built
+      pipeline, positioned before the STT stage
+- [x] `tests/test_search_knowledge_tool.py` extended (+2 tests): a spoofed `organizationId` *and*
+      `organization_id` planted together in tool-call arguments never redirects the query away from
+      the organization the schema was bound to; a query matching nothing returns an honest, empty
+      `{"results": []}` rather than fabricated content
+- [x] `tests/test_context.py` (new, 7 tests): the fixed guardrail text is present (concise/
+      conversational, never invent facts, never claim an unavailable action, never expose internal
+      details) and never names a specific business vertical, while every business-specific detail
+      (name, tone, fallback/after-hours wording) still comes from the configured RuntimeContext
+- [x] `tests/test_session.py` extended (+3 tests): idle timeout firing twice only speaks the
+      fallback once (proves the new idempotency guard); two organizations' sessions never share
+      runtime context or fallback message; a full normal session never logs either credential
+      anywhere (broader than the single pre-existing handler-level check)
+- [x] Full regression: 62 total Python tests passing (up from 26 before this milestone);
+      `apps/api`'s suite unaffected (no changes there); `ruff check`/`ruff format --check`/
+      `mypy --strict` clean throughout
+
+**Documentation**
+- [x] ARCHITECTURE.md §13 (Real AI Voice Runtime) added; §5, §12.4 updated where M6 changed them
+- [x] SECURITY.md §9 (Voice runtime session lifecycle and failure handling) added; stale M12/M13
+      self-references elsewhere in the file corrected to M13/M14 for the M6→M7 renumbering
+- [x] `.env.example` — `DEEPGRAM_MODEL`, `OPENAI_MODEL`, `CARTESIA_VOICE_ID`,
+      `VOICE_AGENT_IDLE_TIMEOUT_SECS` added; stale `Twilio phone/SMS (M6, M10)` label corrected to
+      `(M7, M11)` following the M6→M7 renumbering
+- [x] `IMPLEMENTATION_PLAN.md` — M6 renumbered to M7 (Twilio inbound calls) and M7–M14 shifted to
+      M8–M15, following the file's own "Note on M4" precedent; new M6 section added
+- [x] `DEPLOYMENT.md` — "M14" (Production deployment) references corrected to "M15"
+- [x] `services/voice-agent/README.md`, root `README.md` updated; M1–M5 content left alone except
+      where it names a shifted milestone number
+
+## Remaining M6 work
+
+- [ ] **Real-provider manual smoke test not yet performed in this environment** — no Deepgram/
+      OpenAI/Cartesia credentials were available during implementation. Structural/unit
+      verification is complete; an actual Deepgram → OpenAI → Cartesia conversation over
+      `SmallWebRTCTransport`, including a real `search_knowledge` invocation and observed
+      interruption/turn-taking behavior, remains the outstanding gate before this milestone can be
+      called fully done. Do not treat M6 as real-provider-verified until this is run and confirmed.
+- [ ] Twilio, phone numbers, PSTN, inbound/outbound calling, SIP — M7 (unchanged from M5's
+      exclusion list, just renumbered).
+- [ ] Overall session-maximum-duration cap — not requested; deliberately not confused with the
+      idle/silence timeout that was built.
+- [ ] Credential rotation/reissue tooling — unchanged, pre-existing gap from M5, not touched.
+
+## Known limitations (M6 additions)
+
+- **Real-provider behavior is unverified in this environment** — every automated test runs against
+  fakes; Deepgram/OpenAI/Cartesia have not actually been called. See "Remaining M6 work" above.
+- **No VAD tuning** — `SileroVADAnalyzer()`/`VADProcessor()` are constructed with library defaults;
+  no environment-specific sensitivity/timing tuning has been done or verified against real audio.
+- **`logging_config.py`'s never-log list is a reviewed convention, not an automatic filter** — a
+  future log call added outside `session.py`'s existing pattern is not mechanically prevented from
+  violating it.
 
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M6 through M14.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M7 through M15.

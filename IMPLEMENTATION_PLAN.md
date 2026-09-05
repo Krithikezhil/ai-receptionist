@@ -11,6 +11,13 @@ milestone first. Everything from the original M4 onward shifted down by one — 
 "later milestones' scope may be refined" adjustment this file's own header anticipates, not a
 silent renumbering.
 
+**Note on M6**: this file originally scoped M6 as "Twilio inbound calls." Real-provider/session-
+runtime work (hardening the M5 pipeline with actual STT/LLM/TTS providers and production-shaped
+lifecycle handling) turned out to be a genuine prerequisite for telephony rather than something
+telephony integration should absorb, so it was split out as its own milestone first — the same
+kind of refinement the note above already describes for M4. Twilio inbound calls is now M7;
+everything from the original M6 onward shifted down by one.
+
 ## M1 — Foundation (this milestone)
 
 Monorepo scaffolding, framework bootstraps (Next.js, Express, FastAPI), shared TypeScript
@@ -61,15 +68,35 @@ config, aggregated into one `runtime-context` call), and one read-only function-
 Voice conversations are **not** connected to real phone calls in this milestone — no Twilio, no
 PSTN, no phone numbers, no SIP, no production WebRTC infrastructure. The only transport ever
 instantiated is Pipecat's `SmallWebRTCTransport`, and only in a manual, non-CI, local smoke-test
-entry point (`bot.py`) — real phone connectivity is M6, and the pipeline was deliberately built
-transport-agnostic so M6 only needs to add a Twilio transport, not touch pipeline logic.
+entry point (`bot.py`) — real phone connectivity is M7, and the pipeline was deliberately built
+transport-agnostic so M7 only needs to add a Twilio transport, not touch pipeline logic.
 
-## M6 — Twilio inbound calls
+## M6 — Real AI voice runtime
+
+Wires real STT/LLM/TTS providers (Deepgram, OpenAI, Cartesia) into the M5 pipeline, adds
+turn-taking/interruption detection (Pipecat's `VADProcessor` + `SileroVADAnalyzer`, a local model —
+no network, no credentials), and makes session execution production-shaped: an extracted
+`session.py` orchestrator handles idle-timeout (configurable seconds of actual caller silence, ends
+the call by speaking the existing receptionist `fallbackMessage`), provider-failure handling
+(Pipecat's own `processor_unusable_policy=END`, not custom retry logic), client-disconnect
+handling, and guaranteed cleanup — all reachable only through the same non-telephony
+`SmallWebRTCTransport` dev harness M5 built, still no Twilio/phone number/PSTN anywhere. See
+ARCHITECTURE.md §13 and SECURITY.md §9 for the full design.
+
+Automated tests (fakes/mocks only, zero real provider credentials in CI) cover provider
+configuration, VAD presence, session lifecycle (idle timeout, pipeline-error handling, disconnect,
+cleanup-exactly-once), and that a spoofed `organizationId`/`organization_id` in tool-call arguments
+cannot override the organization bound at session start. An actual real-provider conversation over
+`SmallWebRTCTransport` (Deepgram → OpenAI → Cartesia, including a real `search_knowledge`
+invocation) is the manual verification gate for this milestone, tracked separately since it
+requires real, locally-configured provider keys — see TASKS.md for current status.
+
+## M7 — Twilio inbound calls
 
 Twilio phone number provisioning and inbound call handling, wired into the M5 voice agent.
 Outbound calling is out of scope here and is not currently planned as a near-term milestone.
 
-## M7 — Knowledge retrieval / RAG
+## M8 — Knowledge retrieval / RAG
 
 Extends M4's `knowledge_entries` with chunking and embeddings (a new, additive table — see
 ARCHITECTURE.md §11 for why the M4 schema was deliberately shaped to allow this without a
@@ -77,34 +104,34 @@ redesign) and vector-based retrieval so the voice agent can answer business-spec
 from a larger knowledge base than fits in a single prompt. Vector database selection happens at
 the start of this milestone (not decided yet).
 
-## M8 — Lead capture
+## M9 — Lead capture
 
 Structured lead capture from calls (contact info, intent, notes), stored per-organization.
 
-## M9 — Appointment booking
+## M10 — Appointment booking
 
 Calendar integration (Google Calendar) and booking flow driven by the voice agent.
 
-## M10 — SMS
+## M11 — SMS
 
 SMS confirmations/reminders for bookings and leads (Twilio SMS).
 
-## M11 — Dashboard
+## M12 — Dashboard
 
 Customer-facing dashboard in `apps/web`: call transcripts, call summaries, leads, appointments,
 business analytics, usage tracking.
 
-## M12 — Stripe billing
+## M13 — Stripe billing
 
 Subscription plans, metered usage billing, Stripe webhook handling, billing UI.
 
-## M13 — Security and testing
+## M14 — Security and testing
 
 Dedicated hardening pass: CI-enforced dependency scanning (`npm audit`, `pip-audit`, secret
 scanning), tenant-isolation test coverage across every org-scoped endpoint introduced since M3,
 rate limiting, load testing on the voice path.
 
-## M14 — Production deployment
+## M15 — Production deployment
 
 Target platform selection, CI/CD pipeline, container images for `apps/api` and
 `services/voice-agent`, secrets management, staging/production environment setup, observability

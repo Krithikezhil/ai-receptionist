@@ -40,23 +40,31 @@ def _require_env(name: str) -> str:
     return value
 
 
-def create_stt_service(provider: str) -> STTService:
+def create_stt_service(provider: str, *, model: str = "") -> STTService:
     if provider == "fake":
         return FakeSTTService()
     if provider == "deepgram":
         from pipecat.services.deepgram.stt import DeepgramSTTService
 
-        return DeepgramSTTService(api_key=_require_env("DEEPGRAM_API_KEY"))
+        api_key = _require_env("DEEPGRAM_API_KEY")
+        if model:
+            return DeepgramSTTService(
+                api_key=api_key, settings=DeepgramSTTService.Settings(model=model)
+            )
+        return DeepgramSTTService(api_key=api_key)
     raise ProviderConfigurationError(f"Unrecognized STT_PROVIDER: {provider!r}")
 
 
-def create_llm_service(provider: str) -> LLMService[Any]:
+def create_llm_service(provider: str, *, model: str = "") -> LLMService[Any]:
     if provider == "fake":
         return FakeLLMService()
     if provider == "openai":
         from pipecat.services.openai.llm import OpenAILLMService
 
-        return OpenAILLMService(api_key=_require_env("OPENAI_API_KEY"))
+        api_key = _require_env("OPENAI_API_KEY")
+        if model:
+            return OpenAILLMService(api_key=api_key, model=model)
+        return OpenAILLMService(api_key=api_key)
     raise ProviderConfigurationError(f"Unrecognized LLM_PROVIDER: {provider!r}")
 
 
@@ -66,8 +74,11 @@ def create_tts_service(provider: str) -> TTSService:
     if provider == "cartesia":
         from pipecat.services.cartesia.tts import CartesiaTTSService
 
+        # Cartesia has no universal default voice — voice ids are
+        # per-account, so (unlike the STT/LLM model defaults above) this
+        # must fail closed rather than silently pass None to the SDK.
         return CartesiaTTSService(
             api_key=_require_env("CARTESIA_API_KEY"),
-            voice_id=os.environ.get("CARTESIA_VOICE_ID"),
+            voice_id=_require_env("CARTESIA_VOICE_ID"),
         )
     raise ProviderConfigurationError(f"Unrecognized TTS_PROVIDER: {provider!r}")

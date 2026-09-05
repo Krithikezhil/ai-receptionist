@@ -3,9 +3,9 @@
 Status: **M5 — Voice/AI runtime foundation**, building on M1–M4. This document covers (a) the
 multi-tenant isolation strategy and what actually enforces it, (b) the authentication/session
 security design, (c) the M5 service-to-service authentication design (§8), and (d) the security
-posture of what actually exists today. Full security hardening/testing is milestone **M13** in
+posture of what actually exists today. Full security hardening/testing is milestone **M14** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps growing with each milestone
-that adds real attack surface (payment handling in M12, etc.).
+that adds real attack surface (payment handling in M13, etc.).
 
 ## 1. Multi-tenant isolation
 
@@ -316,7 +316,7 @@ Being explicit about what exists so this section stays honest rather than aspira
   significant near-term hardening item, now joined by the M3 mutating endpoints as additional
   surface that would benefit from it.
 * **No CSRF token** beyond `SameSite=Lax` — M3 adds real mutating endpoints, raising the value of
-  this hardening item for M13.
+  this hardening item for M14.
 * **No PostgreSQL Row-Level Security** — application-layer scoping (`requireOrgMembership` +
   per-query `organizationId` filtering) is the only enforcement currently in place. RLS would be a
   genuine defense-in-depth addition, not a currently-missing requirement (the application-layer
@@ -336,16 +336,18 @@ Being explicit about what exists so this section stays honest rather than aspira
   rotation/reissue endpoint is deferred until a real rotation requirement exists.
 * **No rate limiting on `/internal/v1/...`** either — same pre-existing, already-documented gap as
   `/auth/*`, not newly introduced by M5.
-* **Pipecat/provider dependency surface is new and largely unexercised against real providers** —
-  automated tests only ever run against fakes (ARCHITECTURE.md §12.5); real OpenAI/Deepgram/
-  Cartesia wiring has not been security-reviewed or load-tested, since M5's definition of done is
-  the abstraction plus optional lazy real-provider wiring, not a live provider integration.
+* **Pipecat/provider dependency surface: construction paths are tested, live calls are not** — M6
+  added unit tests that construct each real provider class (`DeepgramSTTService`/
+  `OpenAILLMService`/`CartesiaTTSService`) with dummy credentials to verify correct wiring
+  (model/voice selection, fail-closed configuration), still with zero real API calls anywhere in
+  CI (ARCHITECTURE.md §13.1/§13.5); an actual live conversation is the outstanding real-provider
+  manual verification gate — see TASKS.md.
 * **Knowledge search is a simple substring match only** — no Postgres full-text search
   (`tsvector`), no embeddings, no vector database, no external search service. Sufficient at this
   scale; explicitly not a step toward RAG (see ARCHITECTURE.md §11 on how a future RAG milestone
   would extend the schema additively instead).
 * **No CI-enforced security scanning** (`npm audit`, `pip-audit`, secret scanning) — planned for
-  M13.
+  M14.
 * **No dependency-update automation** (Dependabot/Renovate) configured yet.
 * **Postgres integration is untested against a real database** — Docker unavailable in this
   environment (a local, unrelated Postgres instance was found listening on `localhost:5432` and
@@ -456,3 +458,40 @@ authorization:
   via an explicit `req.headers["x-organization-service-token"]` entry added specifically for it
   (bracket notation is required because fast-redact rejects hyphens in dot-path syntax). No test
   found either raw value in any log output or HTTP response body.
+
+## 9. Voice runtime session lifecycle and failure handling (M6)
+
+Design rationale lives in [ARCHITECTURE.md §13](ARCHITECTURE.md#13-real-ai-voice-runtime-m6). This
+is the authoritative security summary for `session.py`'s lifecycle handling.
+
+* **Idle timeout**: `VOICE_AGENT_IDLE_TIMEOUT_SECS` (default 45s), validated at startup — a
+  malformed or non-positive value raises `ConfigurationError` rather than silently falling back
+  to an unvalidated value. Keyed to actual caller speech only, not general pipeline/bot activity,
+  and not conflated with an overall session-duration cap (none exists). On timeout, the session
+  speaks the receptionist's own configured `fallbackMessage` exactly once and ends — guaranteed
+  by an idempotency guard in `session.py`: Pipecat's own idle-timeout monitor loop re-arms itself
+  on a fixed interval regardless of whether the first `end()` call has finished (the framework's
+  behavior, not something `session.py` controls), so without the guard a very short configured
+  timeout combined with a slow-draining transport could in principle invoke the handler a second
+  time before the first one finishes. The guard makes a second firing a safe no-op — logged, but
+  no second fallback message and no second `end()` call — verified directly by a dedicated test
+  (`test_session.py`), not just reasoned about.
+* **Provider/pipeline failure**: `processor_unusable_policy=ProcessorUnusablePolicy.END` — a
+  provider SDK or any other processor becoming unusable ends the session gracefully rather than
+  looping or hanging. `session.py`'s own error handler never attempts to end/cancel the session or
+  retry itself; it only logs safe, structural metadata and lets Pipecat's own policy drive
+  termination.
+* **Client disconnect**: cancels the session rather than attempting a graceful drain — there is no
+  client left to receive drained audio.
+* **Cleanup**: relies on `ApiClient`'s existing async-context-manager protocol (`async with
+  api_client:`, unchanged since M5), not a separate cleanup helper — `close()` is guaranteed to
+  run exactly once on every exit path.
+* **Logging**: `logging_config.py` is the sole logging entry point for `session.py`, with a
+  documented never-log list (credentials, headers, conversation content, tool arguments/results,
+  raw request/response bodies, raw exception text) — a reviewed convention enforced by code review
+  at one call site, not an automatic filter.
+* **Tenant isolation**: `search_knowledge` remains scoped to the organization id bound once at
+  session start; a spoofed `organizationId`/`organization_id` supplied in tool-call arguments has
+  no effect on which organization is queried — re-verified by a dedicated test in M6.
+* **What did not change**: the M5 two-credential model (§8) and the "voice-agent never touches
+  Postgres directly" boundary are untouched by this milestone.

@@ -71,3 +71,28 @@ async def test_build_pipeline_is_transport_agnostic_and_returns_a_pipeline() -> 
         )
 
         assert isinstance(pipeline, Pipeline)
+
+
+@pytest.mark.asyncio
+async def test_build_pipeline_includes_a_vad_stage() -> None:
+    """A VADProcessor must sit between the transport input and STT — real-
+    time turn-taking/interruption detection, added in M6. Local ONNX model
+    only (SileroVADAnalyzer) — no network, no provider credentials."""
+    async with ApiClient(
+        "http://internal-api.test",
+        "test-key",
+        ORG_TOKEN,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    ) as api_client:
+        pipeline = build_pipeline(
+            transport=_FakeTransport(),
+            stt=FakeSTTService(),
+            llm=FakeLLMService(),
+            tts=FakeTTSService(),
+            runtime_context=_fake_runtime_context(),
+            api_client=api_client,
+        )
+
+        processor_names = [type(p).__name__ for p in pipeline.processors]
+        assert "VADProcessor" in processor_names
+        assert processor_names.index("VADProcessor") < processor_names.index("FakeSTTService")
