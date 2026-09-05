@@ -857,6 +857,12 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
       `README.md`, `DEPLOYMENT.md` updated; M1-M6 content left alone except where it names M7 or
       a fact M7 changed
 
+**Commit and CI**
+- [x] Committed as `276db55` and pushed to `origin/main`. GitHub Actions CI for that exact
+      commit passed: the Node job (lint, typecheck, test, build) and the voice-agent job
+      (ruff, mypy, pytest) both succeeded. This confirms repository/build/test correctness
+      only -- it does not validate real Twilio/PSTN behavior; see "Remaining M7 work" below.
+
 ## Remaining M7 work
 
 - [ ] **Real live Twilio/PSTN call not yet performed in this environment** -- no real Twilio
