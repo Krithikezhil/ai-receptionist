@@ -118,7 +118,7 @@ export function createInternalController(deps: InternalControllerDeps) {
         return;
       }
 
-      const entries = await deps.knowledgeService.listKnowledge(organizationId, parsedQuery.data);
+      const entries = await deps.knowledgeService.searchKnowledge(organizationId, parsedQuery.data);
       const knowledge: RuntimeKnowledgeEntry[] = entries.map((e) => ({
         id: e.id,
         title: e.title,

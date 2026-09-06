@@ -347,6 +347,10 @@ export function createInMemoryKnowledgeChunkRepository(
     async deleteByKnowledgeEntryId(knowledgeEntryId, organizationId) {
       removeExisting(knowledgeEntryId, organizationId);
     },
+
+    async listByOrganizationId(organizationId) {
+      return [...chunks.values()].filter((c) => c.organizationId === organizationId);
+    },
   };
 }
 

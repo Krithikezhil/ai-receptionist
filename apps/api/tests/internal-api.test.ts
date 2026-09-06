@@ -74,6 +74,21 @@ describe("internal voice API (happy path)", () => {
     expect(res.body.knowledge[0].title).toBe("Refund policy");
   });
 
+  it("q parameter is served by the ranked search path but keeps the same response shape", async () => {
+    const res = await request(ctx.app)
+      .get(`/internal/v1/organizations/${orgId}/knowledge?q=parking`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgToken);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.knowledge)).toBe(true);
+    expect(res.body.knowledge.length).toBeGreaterThan(0);
+    expect(res.body.knowledge.length).toBeLessThanOrEqual(5);
+    for (const entry of res.body.knowledge) {
+      expect(Object.keys(entry).sort()).toEqual(["active", "category", "content", "id", "title"]);
+    }
+  });
+
   it("still returns a runtime-context (with enabled: false) for a disabled receptionist — gating is the voice-agent's job, not the API's", async () => {
     // Receptionist configuration is disabled by default at organization
     // creation (see organization.service.ts) — no extra setup needed.

@@ -47,4 +47,12 @@ export interface KnowledgeChunkRepository {
    * future retrieval milestone) can query chunks directly.
    */
   listByKnowledgeEntryId(knowledgeEntryId: string, organizationId: string): Promise<KnowledgeChunk[]>;
+  /**
+   * M8 Step 5: all of an organization's chunks in one query -- the
+   * "brute-force in application code" retrieval design (no pgvector; see
+   * the M8 architecture decision). Used only by knowledge-search.ts's
+   * ranking, called from knowledge.service.ts's searchKnowledge; no HTTP
+   * endpoint exposes this directly.
+   */
+  listByOrganizationId(organizationId: string): Promise<KnowledgeChunk[]>;
 }

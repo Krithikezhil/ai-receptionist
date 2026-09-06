@@ -1,4 +1,4 @@
-import type { KnowledgeChunkRepository } from "../repositories/knowledge-chunk-types.js";
+import type { KnowledgeChunk, KnowledgeChunkRepository } from "../repositories/knowledge-chunk-types.js";
 import type {
   KnowledgeEntry,
   KnowledgeEntryUpdate,
@@ -9,9 +9,19 @@ import type {
 import { logger } from "../config/logger.js";
 import { chunkKnowledgeContent } from "./knowledge-chunking.js";
 import { EmbeddingProviderError, type EmbeddingProvider } from "./embedding-provider.js";
+import { DEFAULT_KNOWLEDGE_SEARCH_LIMIT, rankKnowledgeEntries, type RankableEntry } from "./knowledge-search.js";
 
 export interface KnowledgeService {
   listKnowledge(organizationId: string, filter?: KnowledgeListFilter): Promise<KnowledgeEntry[]>;
+  /**
+   * M8 Step 5: ranked lookup for services/voice-agent's search_knowledge
+   * tool only (wired in internal.controller.ts) -- listKnowledge above is
+   * unchanged and still used by the dashboard's browse/CRUD endpoint. If
+   * filter.q is missing/empty/whitespace, behaves identically to
+   * listKnowledge and never calls the embedding provider. See
+   * knowledge-search.ts for the ranking/fallback/limit algorithm.
+   */
+  searchKnowledge(organizationId: string, filter: KnowledgeListFilter): Promise<KnowledgeEntry[]>;
   createKnowledge(
     organizationId: string,
     input: Omit<NewKnowledgeEntry, "organizationId">,
@@ -86,6 +96,49 @@ export function createKnowledgeService(
   return {
     async listKnowledge(organizationId, filter) {
       return repo.listByOrganizationId(organizationId, filter);
+    },
+
+    async searchKnowledge(organizationId, filter) {
+      const q = filter.q?.trim();
+      if (!q) {
+        return repo.listByOrganizationId(organizationId, filter);
+      }
+
+      const entries = await repo.listByOrganizationId(organizationId, {
+        category: filter.category,
+        active: filter.active,
+      });
+      if (entries.length === 0) return [];
+
+      const allChunks = await chunkRepo.listByOrganizationId(organizationId);
+      const chunksByEntry = new Map<string, KnowledgeChunk[]>();
+      for (const chunk of allChunks) {
+        const existing = chunksByEntry.get(chunk.knowledgeEntryId);
+        if (existing) {
+          existing.push(chunk);
+        } else {
+          chunksByEntry.set(chunk.knowledgeEntryId, [chunk]);
+        }
+      }
+
+      let queryVector: number[] | null = null;
+      try {
+        const vectors = await embeddingProvider.embed([q]);
+        queryVector = vectors[0]!;
+      } catch (err) {
+        if (!(err instanceof EmbeddingProviderError)) throw err;
+        logger.warn(
+          { organizationId, err: err.message },
+          "embedding provider failed during knowledge search; falling back to substring matching only",
+        );
+      }
+
+      const candidates: RankableEntry[] = entries.map((entry) => ({
+        entry,
+        chunks: chunksByEntry.get(entry.id) ?? [],
+      }));
+
+      return rankKnowledgeEntries(queryVector, q, candidates, DEFAULT_KNOWLEDGE_SEARCH_LIMIT);
     },
 
     async createKnowledge(organizationId, input) {

@@ -85,5 +85,13 @@ export function createDrizzleKnowledgeChunkRepository(db: Database): KnowledgeCh
           ),
         );
     },
+
+    async listByOrganizationId(organizationId) {
+      const rows = await db
+        .select()
+        .from(knowledgeChunks)
+        .where(eq(knowledgeChunks.organizationId, organizationId));
+      return rows.map(toDomain);
+    },
   };
 }
