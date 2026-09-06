@@ -896,6 +896,40 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
   `<Connect><Stream>` TwiML semantics that have not been confirmed against real Twilio traffic;
   `auto_hang_up=True` is the documented fallback if the manual live-call test shows otherwise.
 
+## Completed -- M8 Steps 1-5 (Knowledge Chunking, Embedding, and Semantic Search)
+
+**Step 1: Data model (`knowledge_chunks`)**
+- [x] `knowledge_chunks` table -- new, additive table referencing `knowledge_entries.id`, per
+      ARCHITECTURE.md §11's own reserved extension point; `organization_id` denormalized for
+      one-predicate tenant scoping; `embedding` a plain Postgres `real[]` column (no pgvector);
+      nullable to support graceful degradation before/without embedding generation
+
+**Step 2: Chunking (`services/knowledge-chunking.ts`)**
+- [x] `chunkKnowledgeContent()` -- pure, paragraph-first with sentence-boundary and hard-split
+      fallbacks, `DEFAULT_MAX_CHUNK_LENGTH = 800`, positive-integer validation on `maxChunkLength`
+
+**Step 3: Embedding provider (`services/embedding-provider.ts`)**
+- [x] `createEmbeddingProvider()` -- "fake" (deterministic, no network) default; "openai" real
+      provider via direct REST (no SDK); `EMBEDDING_DIMENSIONS = 1536`; `fetch`/response-parsing
+      failures wrapped in `EmbeddingProviderError`; `EmbeddingConfigurationError` reserved for
+      setup-time misconfiguration only
+
+**Step 4: Ingestion wiring (`knowledge.service.ts`, `knowledge-chunk.repository.ts`)**
+- [x] Knowledge-entry create/update chunk + batch-embed automatically; metadata-only updates skip
+      re-embedding; delete cleans up chunks explicitly; `EmbeddingProviderError` degrades
+      gracefully (chunks persisted with `embedding: null`, logged safely); tenant ownership
+      verified inside the same transaction as the write (no composite FK exists to rely on)
+
+**Step 5: Semantic search (`services/knowledge-search.ts`)**
+- [x] `searchKnowledge()` -- ranks by cosine similarity for entries with usable embeddings,
+      substring fallback otherwise, capped at `DEFAULT_KNOWLEDGE_SEARCH_LIMIT = 5`; used only by
+      the internal voice-agent-facing endpoint (`internal.controller.ts`), same route/auth/
+      response shape; dashboard's `listKnowledge` unchanged
+
+Commits `5a837ef` (Steps 1-4) and `c49dda2` (Step 5), both pushed to `origin/main`, CI verified
+green (run [34029628175](https://github.com/Krithikezhil/ai-receptionist/actions/runs/34029628175),
+commit `c49dda2`).
+
 ## Future milestones
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M8 through M15.
