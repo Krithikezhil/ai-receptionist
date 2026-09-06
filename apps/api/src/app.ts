@@ -5,6 +5,7 @@ import helmet from "helmet";
 import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
+import type { KnowledgeChunkRepository } from "./repositories/knowledge-chunk-types.js";
 import type { OrganizationPhoneNumberRepository } from "./repositories/organization-phone-number-types.js";
 import type { OrganizationServiceCredentialRepository } from "./repositories/organization-service-credential-types.js";
 import type { MembershipRepository } from "./repositories/organization-types.js";
@@ -19,6 +20,7 @@ import {
   createBusinessProfileService,
   type BusinessProfileService,
 } from "./services/business-profile.service.js";
+import { createEmbeddingProvider, type EmbeddingProvider } from "./services/embedding-provider.js";
 import { createKnowledgeService, type KnowledgeService } from "./services/knowledge.service.js";
 import {
   createOrganizationService,
@@ -46,6 +48,9 @@ export interface AppDependencies {
   businessHoursService?: BusinessHoursService;
   servicesCatalogService?: ServicesCatalogService;
   knowledgeService?: KnowledgeService;
+  knowledgeChunks?: KnowledgeChunkRepository;
+  /** Injected in tests with a fake (deterministic, no-network) provider instead of a real one. */
+  embeddingProvider?: EmbeddingProvider;
   receptionistConfigService?: ReceptionistConfigService;
   phoneNumberService?: PhoneNumberService;
   /** Injected in tests with a fixed test value instead of a real env secret. */
@@ -69,7 +74,22 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.businessHoursService ?? createBusinessHoursService(repos.businessHours);
   const servicesCatalogService =
     deps.servicesCatalogService ?? createServicesCatalogService(repos.services);
-  const knowledgeService = deps.knowledgeService ?? createKnowledgeService(repos.knowledge);
+  const knowledgeChunks = deps.knowledgeChunks ?? repos.knowledgeChunks;
+  // M8: constructed once, here, at app startup -- createEmbeddingProvider()
+  // validates eagerly (see services/embedding-provider.ts), so a
+  // misconfigured EMBEDDING_PROVIDER=openai (missing key/model) fails the
+  // whole process at boot, the same fail-closed-at-startup treatment
+  // assertAuthSecret()/assertServiceAuthSecret() give their own secrets --
+  // never deferred to a per-request surprise.
+  const embeddingProvider =
+    deps.embeddingProvider ??
+    createEmbeddingProvider(env.embeddingProvider, {
+      apiKey: env.openaiApiKey,
+      model: env.openaiEmbeddingModel,
+    });
+  const knowledgeService =
+    deps.knowledgeService ??
+    createKnowledgeService(repos.knowledge, knowledgeChunks, embeddingProvider);
   const receptionistConfigService =
     deps.receptionistConfigService ?? createReceptionistConfigService(repos.receptionistConfigs);
 

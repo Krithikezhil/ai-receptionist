@@ -36,6 +36,13 @@
       "when": 1788613488718,
       "tag": "0004_massive_albert_cleary",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788636706047,
+      "tag": "0005_even_stryfe",
+      "breakpoints": true
     }
   ]
 }

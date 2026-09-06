@@ -50,6 +50,23 @@ export const env = {
   // this one: nothing should force every deployment to configure it just
   // because /internal/v1 itself is always required.
   twilioCallCredentialSecret: process.env.TWILIO_CALL_CREDENTIAL_SECRET,
+
+  // M8: "fake" is the default so tests and local development never need
+  // real network access or an API key -- mirrors STT_PROVIDER/LLM_PROVIDER/
+  // TTS_PROVIDER's exact convention in services/voice-agent/config.py. Set
+  // to "openai" to generate real embeddings for knowledge search.
+  embeddingProvider: process.env.EMBEDDING_PROVIDER ?? "fake",
+
+  // Only required when embeddingProvider === "openai". No code-level
+  // default -- createEmbeddingProvider() fails closed with a clear error
+  // if this is missing and "openai" was explicitly selected.
+  openaiApiKey: process.env.OPENAI_API_KEY,
+
+  // text-embedding-3-small is the default OpenAI embedding model. This is
+  // the single source of that default -- embedding-provider.ts takes the
+  // resolved model string as a required option rather than keeping its
+  // own copy, so there is exactly one place this literal is ever written.
+  openaiEmbeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small",
 };
 
 /**

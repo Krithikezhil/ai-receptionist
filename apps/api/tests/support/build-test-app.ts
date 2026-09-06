@@ -2,6 +2,7 @@ import { createApp, type AppDependencies } from "../../src/app.js";
 import { createAuthService } from "../../src/services/auth.service.js";
 import { createBusinessHoursService } from "../../src/services/business-hours.service.js";
 import { createBusinessProfileService } from "../../src/services/business-profile.service.js";
+import { createEmbeddingProvider } from "../../src/services/embedding-provider.js";
 import { createKnowledgeService } from "../../src/services/knowledge.service.js";
 import { createOrganizationService } from "../../src/services/organization.service.js";
 import { createPhoneNumberService } from "../../src/services/phone-number.service.js";
@@ -14,6 +15,7 @@ import {
 import {
   createInMemoryBusinessHoursRepository,
   createInMemoryBusinessProfileRepository,
+  createInMemoryKnowledgeChunkRepository,
   createInMemoryKnowledgeRepository,
   createInMemoryOrganizationPhoneNumberRepository,
   createInMemoryOrganizationRepositories,
@@ -70,6 +72,8 @@ export function buildTestApp() {
   const businessHours = createInMemoryBusinessHoursRepository();
   const services = createInMemoryServiceRepository();
   const knowledge = createInMemoryKnowledgeRepository();
+  const knowledgeChunks = createInMemoryKnowledgeChunkRepository(knowledge);
+  const embeddingProvider = createEmbeddingProvider("fake");
   const receptionistConfigs = createInMemoryReceptionistConfigRepository();
   const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
   const organizationPhoneNumbers = createInMemoryOrganizationPhoneNumberRepository();
@@ -86,7 +90,7 @@ export function buildTestApp() {
   const businessProfileService = createBusinessProfileService(businessProfiles);
   const businessHoursService = createBusinessHoursService(businessHours);
   const servicesCatalogService = createServicesCatalogService(services);
-  const knowledgeService = createKnowledgeService(knowledge);
+  const knowledgeService = createKnowledgeService(knowledge, knowledgeChunks, embeddingProvider);
   const receptionistConfigService = createReceptionistConfigService(receptionistConfigs);
   const phoneNumberService = createPhoneNumberService(organizationPhoneNumbers);
 
@@ -98,6 +102,8 @@ export function buildTestApp() {
     businessHoursService,
     servicesCatalogService,
     knowledgeService,
+    knowledgeChunks,
+    embeddingProvider,
     receptionistConfigService,
     phoneNumberService,
     internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
@@ -118,6 +124,7 @@ export function buildTestApp() {
     businessHours,
     services,
     knowledge,
+    knowledgeChunks,
     receptionistConfigs,
     organizationServiceCredentials,
     organizationPhoneNumbers,

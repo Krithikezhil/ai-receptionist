@@ -1,8 +1,10 @@
 import {
   boolean,
+  index,
   integer,
   numeric,
   pgTable,
+  real,
   text,
   timestamp,
   unique,
@@ -261,3 +263,39 @@ export const organizationPhoneNumbers = pgTable("organization_phone_numbers", {
 
 export type OrganizationPhoneNumberRow = typeof organizationPhoneNumbers.$inferSelect;
 export type NewOrganizationPhoneNumberRow = typeof organizationPhoneNumbers.$inferInsert;
+
+/**
+ * M8: chunked, embeddable pieces of one knowledge_entries row -- new,
+ * additive table, exactly the extension point ARCHITECTURE.md §11
+ * reserved at M4 design time ("a future RAG milestone adds
+ * chunking/embeddings as a new, additive table referencing this one's
+ * stable id... not a redesign of it"). knowledge_entries itself is
+ * unchanged by this migration. organization_id is denormalized here
+ * (not derived via a join through knowledge_entries) so every query can
+ * be tenant-scoped in one predicate, matching every other org-owned
+ * table's convention -- and is the first column in this schema to get an
+ * explicit secondary index, since a foreign key alone does not index
+ * itself in Postgres. embedding is nullable: a chunk exists as soon as
+ * it's created by chunking, before embedding generation has necessarily
+ * completed -- see the M8 plan's graceful-degradation design.
+ */
+export const knowledgeChunks = pgTable(
+  "knowledge_chunks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    knowledgeEntryId: uuid("knowledge_entry_id")
+      .notNull()
+      .references(() => knowledgeEntries.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    chunkIndex: integer("chunk_index").notNull(),
+    content: text("content").notNull(),
+    embedding: real("embedding").array(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("knowledge_chunks_organization_id_idx").on(t.organizationId)],
+);
+
+export type KnowledgeChunkRow = typeof knowledgeChunks.$inferSelect;
+export type NewKnowledgeChunkRow = typeof knowledgeChunks.$inferInsert;

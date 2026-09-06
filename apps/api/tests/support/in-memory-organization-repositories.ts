@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type {
+  KnowledgeChunk,
+  KnowledgeChunkRepository,
+  NewKnowledgeChunk,
+} from "../../src/repositories/knowledge-chunk-types.js";
+import type {
   KnowledgeEntry,
   KnowledgeRepository,
   NewKnowledgeEntry,
@@ -280,6 +285,67 @@ export function createInMemoryKnowledgeRepository(): KnowledgeRepository {
       if (!existing || existing.organizationId !== organizationId) return false;
       items.delete(id);
       return true;
+    },
+  };
+}
+
+/**
+ * M8: takes the already-constructed in-memory KnowledgeRepository as an
+ * explicit, visible parameter -- used only to verify (mirroring the real
+ * Drizzle repository's own application-level check, see
+ * drizzle/knowledge-chunk.repository.ts) that a knowledgeEntryId actually
+ * belongs to the supplied organizationId before "persisting" chunks for it.
+ * Not used for cascade-delete: knowledge.service.ts's deleteKnowledge calls
+ * deleteByKnowledgeEntryId explicitly instead of relying on any fake-only
+ * cascade mechanism (the real DB's ON DELETE CASCADE from Step 1 is not
+ * modeled here at all -- that guarantee is the database's, not this
+ * double's, to provide).
+ */
+export function createInMemoryKnowledgeChunkRepository(
+  knowledgeRepo: KnowledgeRepository,
+): KnowledgeChunkRepository {
+  const chunks = new Map<string, KnowledgeChunk>();
+
+  function removeExisting(knowledgeEntryId: string, organizationId: string): void {
+    for (const [id, chunk] of chunks) {
+      if (chunk.knowledgeEntryId === knowledgeEntryId && chunk.organizationId === organizationId) {
+        chunks.delete(id);
+      }
+    }
+  }
+
+  return {
+    async replaceChunksForKnowledgeEntry(knowledgeEntryId, organizationId, newChunks) {
+      const entry = await knowledgeRepo.findByIdAndOrganizationId(knowledgeEntryId, organizationId);
+      if (!entry) {
+        throw new Error(
+          `Cannot persist chunks for knowledge entry ${knowledgeEntryId}: it does not belong to organization ${organizationId}.`,
+        );
+      }
+
+      removeExisting(knowledgeEntryId, organizationId);
+
+      const created: KnowledgeChunk[] = newChunks.map((chunk: NewKnowledgeChunk) => ({
+        id: randomUUID(),
+        knowledgeEntryId,
+        organizationId,
+        chunkIndex: chunk.chunkIndex,
+        content: chunk.content,
+        embedding: chunk.embedding,
+        createdAt: new Date(),
+      }));
+      for (const chunk of created) chunks.set(chunk.id, chunk);
+      return created;
+    },
+
+    async listByKnowledgeEntryId(knowledgeEntryId, organizationId) {
+      return [...chunks.values()].filter(
+        (c) => c.knowledgeEntryId === knowledgeEntryId && c.organizationId === organizationId,
+      );
+    },
+
+    async deleteByKnowledgeEntryId(knowledgeEntryId, organizationId) {
+      removeExisting(knowledgeEntryId, organizationId);
     },
   };
 }

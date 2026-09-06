@@ -1,6 +1,7 @@
 import { getDb } from "../db/client.js";
 import { createDrizzleBusinessHoursRepository } from "./drizzle/business-hours.repository.js";
 import { createDrizzleBusinessProfileRepository } from "./drizzle/business-profile.repository.js";
+import { createDrizzleKnowledgeChunkRepository } from "./drizzle/knowledge-chunk.repository.js";
 import { createDrizzleKnowledgeRepository } from "./drizzle/knowledge.repository.js";
 import { createDrizzleMembershipRepository } from "./drizzle/membership.repository.js";
 import { createDrizzleOrganizationPhoneNumberRepository } from "./drizzle/organization-phone-number.repository.js";
@@ -11,6 +12,7 @@ import { createDrizzleServiceRepository } from "./drizzle/service.repository.js"
 import { createDrizzleSessionRepository } from "./drizzle/session.repository.js";
 import { createDrizzleUnitOfWork } from "./drizzle/unit-of-work.js";
 import { createDrizzleUserRepository } from "./drizzle/user.repository.js";
+import type { KnowledgeChunkRepository } from "./knowledge-chunk-types.js";
 import type { KnowledgeRepository } from "./knowledge-types.js";
 import type { OrganizationPhoneNumberRepository } from "./organization-phone-number-types.js";
 import type { OrganizationServiceCredentialRepository } from "./organization-service-credential-types.js";
@@ -34,6 +36,7 @@ export interface Repositories {
   businessHours: BusinessHoursRepository;
   services: ServiceRepository;
   knowledge: KnowledgeRepository;
+  knowledgeChunks: KnowledgeChunkRepository;
   receptionistConfigs: ReceptionistConfigRepository;
   organizationServiceCredentials: OrganizationServiceCredentialRepository;
   organizationPhoneNumbers: OrganizationPhoneNumberRepository;
@@ -51,6 +54,7 @@ export function createRepositories(): Repositories {
     businessHours: createDrizzleBusinessHoursRepository(db),
     services: createDrizzleServiceRepository(db),
     knowledge: createDrizzleKnowledgeRepository(db),
+    knowledgeChunks: createDrizzleKnowledgeChunkRepository(db),
     receptionistConfigs: createDrizzleReceptionistConfigRepository(db),
     organizationServiceCredentials: createDrizzleOrganizationServiceCredentialRepository(db),
     organizationPhoneNumbers: createDrizzleOrganizationPhoneNumberRepository(db),
@@ -66,6 +70,7 @@ export type {
   OrganizationRepository,
   ServiceRepository,
 } from "./organization-types.js";
+export type { KnowledgeChunkRepository } from "./knowledge-chunk-types.js";
 export type { KnowledgeRepository } from "./knowledge-types.js";
 export type { OrganizationServiceCredentialRepository } from "./organization-service-credential-types.js";
 export type { OrganizationPhoneNumberRepository } from "./organization-phone-number-types.js";
