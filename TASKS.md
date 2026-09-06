@@ -896,7 +896,7 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
   `<Connect><Stream>` TwiML semantics that have not been confirmed against real Twilio traffic;
   `auto_hang_up=True` is the documented fallback if the manual live-call test shows otherwise.
 
-## Completed -- M8 Steps 1-8 (Knowledge Chunking, Embedding, and Semantic Search)
+## Completed -- M8 Steps 1-11 (Knowledge Chunking, Embedding, and Semantic Search)
 
 **Step 1: Data model (`knowledge_chunks`)**
 - [x] `knowledge_chunks` table -- new, additive table referencing `knowledge_entries.id`, per
@@ -946,7 +946,12 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
       a Step 9 documentation item, not a security issue (both already default safely to `fake`/
       unset behavior when omitted).
 
-**Step 10 (in progress): pre-commit audit finding**
+**Step 10: Pre-commit audit**
+- [x] Full read-only pre-commit audit across seven areas -- git working-tree scope, M8
+      implementation-vs-documentation consistency, tests/typecheck/lint/CI status,
+      migration/schema consistency, tenant-isolation/security-sensitive paths, embedding-provider
+      configuration/secrets, and dependency/unintended-file checks -- plus a final synthesis; all
+      passed with one recorded finding (below), no code change required.
 - **Pre-existing M6 gap, not an M8 regression.** `mypy --strict` on `services/voice-agent` reports
       one error: `tests/test_session.py:46: error: Need type annotation for "RUNTIME_CONTEXT_JSON"
       [var-annotated]`. Confirmed facts (git history): `test_session.py`'s entire commit history
@@ -955,14 +960,29 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
       commits (`5a837ef`, `c49dda2`, `897c1d4`) touch this file -- so the unannotated code itself
       predates M8. Not independently verified: whether `mypy --strict` actually raised this error
       back when `65247bb` was committed (would require checking out that historical commit, which
-      was not done). Recorded here as a pre-existing M6 code pattern discovered during the M8
-      Step 10 audit; not fixed as part of M8 Step 10 -- out of scope for this milestone.
+      was not done). Recorded as a pre-existing M6 code pattern discovered during the M8 Step 10
+      audit; not fixed as part of M8 Step 10 -- out of scope for this milestone.
 
-Commits `5a837ef` (Steps 1-4) and `c49dda2` (Step 5), both pushed to `origin/main`, CI verified
-green (run [34029628175](https://github.com/Krithikezhil/ai-receptionist/actions/runs/34029628175),
-commit `c49dda2`). Steps 6-8 involved no source changes and no new commits. Steps 9 (documentation),
-10 (pre-commit audit), and 11 (manual review of real OpenAI embedding quality) are not yet
-complete -- M8 is not yet fully done.
+**Step 11: Manual review of real OpenAI embedding quality**
+- [x] Real `EMBEDDING_PROVIDER=openai` smoke test against a small, synthetic SMB knowledge set (6
+      entries covering hours, cancellation policy, pricing, walk-in policy, plus two unrelated
+      entries) and 4 paraphrased queries, using the real `createEmbeddingProvider`/
+      `rankKnowledgeEntries`/`cosineSimilarity` production code unmodified, via exactly 2 batched
+      `embed()` calls (all entry chunks in one request, all queries in the other) -- not committed
+      to the repository, run from a local, out-of-band script only. Results: both batched requests
+      succeeded; every returned vector was exactly `EMBEDDING_DIMENSIONS = 1536`; all 4/4 queries
+      ranked their semantically-matching entry first despite paraphrasing (no keyword overlap); the
+      two unrelated entries never ranked first for any query; the `DEFAULT_KNOWLEDGE_SEARCH_LIMIT =
+      5` cap held against 6 real candidates. Substring-fallback and provider-error-handling paths
+      were not re-exercised by this run -- those remain covered only by the existing fake-provider
+      unit tests, unaffected by this review.
+
+Commits `5a837ef` (Steps 1-4), `c49dda2` (Step 5), and `e91a66e` (Step 9 documentation + Step 10
+audit-finding note), all pushed to `origin/main`, CI verified green (`c49dda2`: run
+[34029628175](https://github.com/Krithikezhil/ai-receptionist/actions/runs/34029628175); `e91a66e`:
+run [34037969636](https://github.com/Krithikezhil/ai-receptionist/actions/runs/34037969636)). Steps
+6-8, 10, and 11 involved no source changes and no new commits. All 11 established M8 steps are now
+complete.
 
 ## Future milestones
 
