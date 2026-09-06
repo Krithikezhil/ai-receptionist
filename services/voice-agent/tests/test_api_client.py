@@ -4,6 +4,8 @@ no real network, no real apps/api instance needed.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -106,6 +108,81 @@ async def test_search_knowledge_sends_query_and_category_params() -> None:
         await client.search_knowledge(ORG_ID, query="parking", category="faq")
 
     assert seen == {"q": "parking", "category": "faq"}
+
+
+@pytest.mark.asyncio
+async def test_create_lead_sends_only_the_provided_fields() -> None:
+    seen_body: dict[str, object] = {}
+    seen_path = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_path
+        seen_path = request.url.path
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"lead": {"id": "lead-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test",
+        "test-key",
+        ORG_TOKEN,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        await client.create_lead(ORG_ID, contact_name="Jane Caller", intent="Wants a quote")
+
+    assert seen_path == f"/internal/v1/organizations/{ORG_ID}/leads"
+    assert seen_body == {"contactName": "Jane Caller", "intent": "Wants a quote"}
+
+
+@pytest.mark.asyncio
+async def test_create_lead_omits_fields_that_were_not_provided() -> None:
+    seen_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"lead": {"id": "lead-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.create_lead(ORG_ID, contact_phone="555-1234")
+
+    assert seen_body == {"contactPhone": "555-1234"}
+
+
+@pytest.mark.asyncio
+async def test_create_lead_403_raises_api_forbidden_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "Not authorized for this organization."})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiForbiddenError):
+            await client.create_lead(ORG_ID, contact_name="Jane Caller")
+
+
+@pytest.mark.asyncio
+async def test_create_lead_400_raises_generic_api_client_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "Invalid lead data."})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiClientError):
+            await client.create_lead(ORG_ID)
+
+
+@pytest.mark.asyncio
+async def test_create_lead_unreachable_server_raises_api_unreachable_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiUnreachableError):
+            await client.create_lead(ORG_ID, contact_name="Jane Caller")
 
 
 @pytest.mark.asyncio

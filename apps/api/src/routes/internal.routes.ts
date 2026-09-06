@@ -53,6 +53,14 @@ export function createInternalRouter(deps: InternalRouterDeps): Router {
     organizationAuth,
     controller.listKnowledge,
   );
+  // M9 Step 6: the first write-capable route on this router. Same
+  // two-stage auth chain as every GET above -- no new middleware.
+  router.post(
+    "/organizations/:organizationId/leads",
+    serviceAuth,
+    organizationAuth,
+    controller.createLead,
+  );
   router.get("/twilio/phone-numbers/:phoneNumber", serviceAuth, controller.lookupPhoneNumber);
 
   return router;

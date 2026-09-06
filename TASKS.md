@@ -984,6 +984,88 @@ run [34037969636](https://github.com/Krithikezhil/ai-receptionist/actions/runs/3
 6-8, 10, and 11 involved no source changes and no new commits. All 11 established M8 steps are now
 complete.
 
+## M9 -- Lead capture (in progress)
+
+**Step 4 verification note (test-runner flake, not a code defect)**
+- The first `npm run test -w apps/api` verification run after M9 Step 4 (service layer) hit the
+      same Windows/Vitest worker-process crash already documented in M8 Step 7:
+      `STATUS_ACCESS_VIOLATION`, exit code `3221226505` / `0xC0000005`, while running
+      `apps/api/tests/internal-api.test.ts`. 13/14 test files and 205/206 tests had already passed
+      before the worker error. A single authorized diagnostic rerun immediately afterward completed
+      cleanly: 14/14 test files passed, 206/206 tests passed, no worker error. No source or
+      configuration file was changed between the two runs, and the crash did not reproduce on
+      rerun -- recorded as a transient, non-reproduced test-runner/environmental flake, consistent
+      with the existing M8 precedent, not a proven root cause.
+
+**Step 7: Voice-agent lead capture**
+- [x] `create_lead()` added to `ApiClient` (the voice agent's only write-capable internal-API
+      call); new `capture_lead` tool (`tools/capture_lead.py`) with no JSON-schema-required
+      fields and an explicit no-invention/no-guessing description; registered alongside
+      `search_knowledge` in `pipeline.py`'s tool list; `call_sid` threaded from the real M7
+      Twilio path (`routes/twilio.py`) through `run_session()`/`build_pipeline()` as an optional,
+      server-bound value, never read from LLM tool arguments -- `organizationId` remains bound
+      once at pipeline-build time the same way, unreachable from tool arguments. Post-fix
+      verification: targeted tests 26/26; full voice-agent suite 120/120 across 14 test files;
+      `ruff check .` PASS; `ruff format --check .` PASS; `mypy src` PASS. Two defects found during
+      first verification were fixed and re-verified: `tests/test_twilio_media_stream.py`'s
+      `fake_run_session()` stub needed the new `call_sid` keyword added to its signature, and
+      `tools/capture_lead.py`'s `notes` property description exceeded the 100-character line
+      limit (Ruff E501) -- both confirmed resolved on rerun.
+
+**Step 8: Full regression across both suites**
+- [x] apps/api: `npm run typecheck -w apps/api` PASS; `npm run lint -w apps/api` PASS;
+      `npm run test -w apps/api` PASS -- 15/15 test files, 227/227 tests. services/voice-agent:
+      `uv run ruff check .` PASS; `uv run ruff format --check .` PASS (42 files already
+      formatted); `uv run mypy src` PASS (27 source files); `uv run python -m pytest tests`
+      PASS -- 14/14 test files, 120/120 tests. No regressions found anywhere outside M9's own
+      new/touched files; the regression run itself made no working-tree changes.
+
+**Step 10: Pre-commit audit**
+- [x] Full read-only pre-commit audit of the accumulated M9 change set (Steps 1-9), covering M9
+      scope/changed-file review, database/migration consistency, tenant isolation, write-path
+      security, validation/input limits, dashboard and internal API boundaries, voice-agent
+      integration, PII/error-logging review, documentation review, and git hygiene -- all passed
+      with one recorded finding (below), no code change required beyond that finding's own fix.
+      An extra trailing blank line at EOF in `apps/api/tests/internal-api.test.ts` (flagged by
+      `git diff --check`) was removed; a subsequent `git diff --check` reported no whitespace
+      errors.
+- **Post-cleanup verification: intermittent Windows/Vitest worker flake, no identified root
+      cause.** `npm run typecheck -w apps/api` PASS; `npm run lint -w apps/api` PASS. The full
+      apps/api test suite was run three times after the EOF cleanup: Run 1 hit a worker-process
+      crash (`STATUS_ACCESS_VIOLATION`, exit code `3221226505` / `0xC0000005`) while
+      `apps/api/tests/twilio-phone-lookup.test.ts` was running -- 221/227 completed tests passed,
+      zero assertion failures; Run 2 hit the same crash signature while
+      `apps/api/tests/internal-api.test.ts` was running -- 224/227 completed tests passed, zero
+      assertion failures; Run 3 completed cleanly -- 15/15 test files, 227/227 tests passed. The
+      crash occurred intermittently, in different Vitest worker-fork processes/files each time,
+      with no test ever failing an assertion. Recorded as an intermittent Windows/Vitest
+      worker-process flake with no identified root cause -- not claimed as definitively
+      environmental, and not claimed as definitively unrelated to any code. No configuration
+      change or workaround was applied. The final clean run, together with zero assertion
+      failures across all three runs, supports commit readiness; the flake itself remains a known
+      verification caveat.
+
+**Step 11: Final manual verification**
+- [ ] **Real end-to-end persistence verification not yet performed in this environment.** M9's
+      final manual-verification step -- the milestone's equivalent of M6's real-provider
+      conversation verification and M7's real live Twilio/PSTN call verification -- has not been
+      performed here, because: no PostgreSQL instance is currently available/running in this
+      environment; Docker/Docker Compose is not installed in this environment; the M9 migration
+      (`0006_equal_sebastian_shaw.sql`) has been generated and inspected but has not been applied
+      to a real PostgreSQL database here; and a genuine voice conversation using the real
+      provider/Twilio path has not been manually verified here (M6/M7's own real-provider/real-call
+      manual verification remain outstanding as well -- see "Remaining M6 work" and "Remaining M7
+      work" above). As a result, the complete real-world chain from the voice agent's
+      `capture_lead` tool call, through the real internal API, through Drizzle, into real
+      PostgreSQL persistence, has not yet been proven end-to-end. Do not treat M9 as
+      persistence-verified until this is run and confirmed.
+- [ ] **Automated M9 verification remains complete and passing, but does not substitute for this.**
+      Steps 1-10's full apps/api (227/227) and voice-agent (120/120) automated test suites --
+      exercising the schema, repository, validation, service, dashboard, internal API, and
+      voice-agent tool logic against in-memory repositories and mocked HTTP transports -- all pass
+      and remain valid evidence of correctness at the unit/integration level. That coverage is not
+      a substitute for the real-infrastructure verification described above.
+
 ## Future milestones
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M8 through M15.

@@ -582,3 +582,43 @@ this section covers only the security-relevant parts.
   exercised, including in CI; the real `"openai"` REST integration's error handling has
   unit-level coverage (malformed responses, network failure) but has not been exercised against
   the real OpenAI API in this environment.
+
+## 12. Lead capture tenant ownership and PII handling (M9)
+
+Full implementation detail lives in [TASKS.md](TASKS.md)'s M9 tracking (ARCHITECTURE.md's own M9
+section has not been written yet); this section covers only the security-relevant parts.
+
+* **First genuine third-party PII in this schema.** `leads` (`contactName`, `contactPhone`,
+  `contactEmail`, plus freeform `intent`/`notes`) is the first table in this schema holding a
+  caller's own contact information -- every other table (business profiles, knowledge, services)
+  holds only the organization's own data about itself, not a third party's.
+* **Tenant ownership enforced the same way as every other org-owned resource.** `organizationId`
+  is `NOT NULL` with a foreign key to `organizations.id` (`ON DELETE CASCADE`); every
+  `LeadRepository` lookup/mutation (`listByOrganizationId`, `findByIdAndOrganizationId`,
+  `updateStatus`, `deleteByIdAndOrganizationId`) is scoped by `organizationId` at the query level,
+  and the interface itself has no operation that accepts a bare lead id -- unlike
+  `knowledge_chunks` (§11), `leads` has no parent entity to verify ownership against, so no
+  additional in-transaction check is needed here.
+* **No new authentication surface.** The internal lead-creation endpoint
+  (`POST /internal/v1/organizations/:id/leads`) reuses the exact same `requireServiceAuth` +
+  `requireOrganizationAuth` chain as every other `/internal/v1/*` route (§8, §10) -- no new
+  credential type, no new middleware.
+* **`organizationId` is never voice-agent/LLM-controlled.** It is resolved once, server-side, from
+  the already-verified session context (the M5 token or M7 call credential) and bound into the
+  `capture_lead` tool's schema at pipeline-build time -- the tool's JSON schema has no
+  `organization_id` property, so the LLM cannot supply, override, or spoof it via tool-call
+  arguments, the same binding pattern `search_knowledge` already uses.
+* **The `capture_lead` tool's no-invention design is a data-integrity control, not just a
+  security one.** No field is JSON-schema-required (so the LLM is never pressured to fabricate a
+  value to make a valid call), and its description explicitly instructs the LLM to omit anything
+  the caller did not actually say -- this protects the accuracy of what gets written to a real
+  business's lead data, the same way this schema's manual-entry-only knowledge design (§11)
+  protects what the receptionist tells a caller.
+* **Known, accepted limitation.** There is currently no lead retention, export, or
+  deletion/compliance policy -- captured leads persist indefinitely with no automated purge, no
+  data-subject export mechanism, and no redaction tooling. No PII-specific encryption or
+  access-control layer is applied to lead data beyond what every other table in this schema
+  already gets. This is a real, currently-unaddressed limitation for a table holding third-party
+  contact information -- addressing it (retention windows, export, deletion, redaction) falls
+  under milestone **M14**'s already-stated full-hardening scope (see the Status line above), not
+  a claim that any part of it is already built.

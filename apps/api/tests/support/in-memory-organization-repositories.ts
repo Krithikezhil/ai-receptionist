@@ -9,6 +9,7 @@ import type {
   KnowledgeRepository,
   NewKnowledgeEntry,
 } from "../../src/repositories/knowledge-types.js";
+import type { Lead, LeadRepository, NewLead } from "../../src/repositories/lead-types.js";
 import type {
   BusinessHoursEntry,
   BusinessHoursRepository,
@@ -222,6 +223,51 @@ export function createInMemoryServiceRepository(): ServiceRepository {
       return item;
     },
     async update(id, organizationId, changes) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return undefined;
+      const updated = { ...existing, ...changes, updatedAt: new Date() };
+      items.set(id, updated);
+      return updated;
+    },
+    async deleteByIdAndOrganizationId(id, organizationId) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return false;
+      items.delete(id);
+      return true;
+    },
+  };
+}
+
+export function createInMemoryLeadRepository(): LeadRepository {
+  const items = new Map<string, Lead>();
+
+  return {
+    async listByOrganizationId(organizationId) {
+      return [...items.values()].filter((l) => l.organizationId === organizationId);
+    },
+    async findByIdAndOrganizationId(id, organizationId) {
+      const item = items.get(id);
+      return item && item.organizationId === organizationId ? item : undefined;
+    },
+    async create(newLead: NewLead) {
+      const now = new Date();
+      const lead: Lead = {
+        id: randomUUID(),
+        organizationId: newLead.organizationId,
+        contactName: newLead.contactName ?? null,
+        contactPhone: newLead.contactPhone ?? null,
+        contactEmail: newLead.contactEmail ?? null,
+        intent: newLead.intent ?? null,
+        notes: newLead.notes ?? null,
+        callSid: newLead.callSid ?? null,
+        status: newLead.status ?? "new",
+        createdAt: now,
+        updatedAt: now,
+      };
+      items.set(lead.id, lead);
+      return lead;
+    },
+    async updateStatus(id, organizationId, changes) {
       const existing = items.get(id);
       if (!existing || existing.organizationId !== organizationId) return undefined;
       const updated = { ...existing, ...changes, updatedAt: new Date() };

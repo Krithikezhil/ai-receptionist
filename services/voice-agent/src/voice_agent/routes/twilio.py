@@ -209,6 +209,7 @@ def create_twilio_router(settings: Settings) -> APIRouter:
             organization_service_token=call_credential,
             transport=transport,
             settings=settings,
+            call_sid=real_call_sid,
         )
 
     return router

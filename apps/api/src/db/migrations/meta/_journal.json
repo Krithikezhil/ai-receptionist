@@ -43,6 +43,13 @@
       "when": 1788636706047,
       "tag": "0005_even_stryfe",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788712472002,
+      "tag": "0006_equal_sebastian_shaw",
+      "breakpoints": true
     }
   ]
 }

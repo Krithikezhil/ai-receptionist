@@ -2,6 +2,7 @@ import { Router } from "express";
 import { createBusinessHoursController } from "../controllers/business-hours.controller.js";
 import { createBusinessProfileController } from "../controllers/business-profile.controller.js";
 import { createKnowledgeController } from "../controllers/knowledge.controller.js";
+import { createLeadController } from "../controllers/lead.controller.js";
 import { createOrganizationController } from "../controllers/organization.controller.js";
 import { createPhoneNumberController } from "../controllers/phone-number.controller.js";
 import { createReceptionistConfigController } from "../controllers/receptionist-config.controller.js";
@@ -13,6 +14,7 @@ import type { AuthService } from "../services/auth.service.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
+import type { LeadService } from "../services/lead.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
 import type { PhoneNumberService } from "../services/phone-number.service.js";
 import type { ReceptionistConfigService } from "../services/receptionist-config.service.js";
@@ -26,6 +28,7 @@ export interface OrganizationRouterDeps {
   businessHoursService: BusinessHoursService;
   servicesCatalogService: ServicesCatalogService;
   knowledgeService: KnowledgeService;
+  leadService: LeadService;
   receptionistConfigService: ReceptionistConfigService;
   phoneNumberService: PhoneNumberService;
 }
@@ -40,6 +43,7 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   const hours = createBusinessHoursController(deps.businessHoursService);
   const catalog = createServiceCatalogController(deps.servicesCatalogService);
   const knowledge = createKnowledgeController(deps.knowledgeService);
+  const leads = createLeadController(deps.leadService);
   const receptionistConfig = createReceptionistConfigController(deps.receptionistConfigService);
   const phoneNumbers = createPhoneNumberController(deps.phoneNumberService);
 
@@ -63,6 +67,14 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   router.post("/:organizationId/knowledge", auth, membership, knowledge.create);
   router.patch("/:organizationId/knowledge/:knowledgeId", auth, membership, knowledge.update);
   router.delete("/:organizationId/knowledge/:knowledgeId", auth, membership, knowledge.remove);
+
+  // M9 Step 5: dashboard-only, status-update-only -- no POST here (leads
+  // are only ever created by the voice agent's capture_lead tool, a later
+  // M9 step). Every operation is scoped by :organizationId via auth +
+  // membership, identical to every other resource in this router.
+  router.get("/:organizationId/leads", auth, membership, leads.list);
+  router.patch("/:organizationId/leads/:leadId", auth, membership, leads.updateStatus);
+  router.delete("/:organizationId/leads/:leadId", auth, membership, leads.remove);
 
   router.get("/:organizationId/receptionist-config", auth, membership, receptionistConfig.get);
   router.put("/:organizationId/receptionist-config", auth, membership, receptionistConfig.update);

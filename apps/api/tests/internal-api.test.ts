@@ -433,3 +433,112 @@ describe("organization service credential — issuance and storage", () => {
     expect(JSON.stringify(res.body)).not.toContain("serviceCredential");
   });
 });
+
+describe("internal voice API -- lead capture (M9 Step 6)", () => {
+  let ctx: Ctx;
+  let orgAId: string;
+  let orgAToken: string;
+  let orgBId: string;
+
+  beforeEach(async () => {
+    ctx = buildTestApp();
+    const ownerA = await registerAgent(ctx, "owner-a@example.com");
+    const createdA = await createOrg(ownerA.agent, "Org A");
+    orgAId = createdA.organization.id;
+    orgAToken = createdA.serviceCredential.token;
+
+    const ownerB = await registerAgent(ctx, "owner-b@example.com");
+    const createdB = await createOrg(ownerB.agent, "Org B");
+    orgBId = createdB.organization.id;
+  });
+
+  it("creates a lead with a valid service credential and organization token", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller", intent: "Wants a quote" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.lead).toMatchObject({
+      organizationId: orgAId,
+      contactName: "Jane Caller",
+      intent: "Wants a quote",
+      status: "new",
+    });
+
+    const stored = await ctx.leads.findByIdAndOrganizationId(res.body.lead.id, orgAId);
+    expect(stored).toBeDefined();
+  });
+
+  it("rejects a completely empty lead", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects lead creation with no Authorization header", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller" });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects lead creation with an invalid global service credential", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", "Bearer wrong-key")
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller" });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects lead creation when the organization token is missing", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .send({ contactName: "Jane Caller" });
+    expect(res.status).toBe(403);
+  });
+
+  it("org A's token cannot create a lead for org B", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgBId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller" });
+    expect(res.status).toBe(403);
+
+    const leaked = await ctx.leads.listByOrganizationId(orgBId);
+    expect(leaked).toHaveLength(0);
+  });
+
+  it("ignores a spoofed organizationId in the request body -- the URL/token-verified id always wins", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller", organizationId: orgBId });
+
+    expect(res.status).toBe(201);
+    expect(res.body.lead.organizationId).toBe(orgAId);
+
+    const leakedIntoB = await ctx.leads.listByOrganizationId(orgBId);
+    expect(leakedIntoB).toHaveLength(0);
+  });
+
+  it("newly created leads always have status 'new', never a caller-supplied value", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller", status: "closed" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.lead.status).toBe("new");
+  });
+});

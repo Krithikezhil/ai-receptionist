@@ -124,9 +124,66 @@ class ApiClient:
         )
         return [KnowledgeEntry.model_validate(entry) for entry in data["knowledge"]]
 
+    async def create_lead(
+        self,
+        organization_id: str,
+        *,
+        contact_name: str | None = None,
+        contact_phone: str | None = None,
+        contact_email: str | None = None,
+        intent: str | None = None,
+        notes: str | None = None,
+        call_sid: str | None = None,
+    ) -> None:
+        """POST /internal/v1/organizations/:id/leads (M9 Step 6/7) -- the
+        voice agent's only write-capable call to apps/api. Only non-empty
+        fields are ever placed in the request body -- a field the caller
+        never provided is simply absent, not sent as an explicit null/empty
+        string, matching apps/api's own "at least one field" contract (see
+        tools/capture_lead.py for where these values actually come from).
+        """
+        body: dict[str, str] = {}
+        if contact_name:
+            body["contactName"] = contact_name
+        if contact_phone:
+            body["contactPhone"] = contact_phone
+        if contact_email:
+            body["contactEmail"] = contact_email
+        if intent:
+            body["intent"] = intent
+        if notes:
+            body["notes"] = notes
+        if call_sid:
+            body["callSid"] = call_sid
+
+        await self._post(f"/internal/v1/organizations/{organization_id}/leads", body)
+
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
             response = await self._client.get(path, params=params)
+        except httpx.RequestError as exc:
+            raise ApiUnreachableError(f"Could not reach apps/api at {path}: {exc}") from exc
+
+        if response.status_code == 401:
+            raise ApiUnauthorizedError("apps/api rejected the internal service credential.")
+        if response.status_code == 403:
+            raise ApiForbiddenError(
+                "apps/api rejected the organization service token for this organization."
+            )
+        if response.status_code == 404:
+            raise ApiNotFoundError(f"Organization not found (requested {path}).")
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ApiClientError(f"apps/api returned {response.status_code} for {path}.") from exc
+
+        result: dict[str, Any] = response.json()
+        return result
+
+    async def _post(self, path: str, json_body: dict[str, str]) -> dict[str, Any]:
+        try:
+            response = await self._client.post(path, json=json_body)
         except httpx.RequestError as exc:
             raise ApiUnreachableError(f"Could not reach apps/api at {path}: {exc}") from exc
 

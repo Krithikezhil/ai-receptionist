@@ -4,6 +4,7 @@ import { createBusinessHoursService } from "../../src/services/business-hours.se
 import { createBusinessProfileService } from "../../src/services/business-profile.service.js";
 import { createEmbeddingProvider } from "../../src/services/embedding-provider.js";
 import { createKnowledgeService } from "../../src/services/knowledge.service.js";
+import { createLeadService } from "../../src/services/lead.service.js";
 import { createOrganizationService } from "../../src/services/organization.service.js";
 import { createPhoneNumberService } from "../../src/services/phone-number.service.js";
 import { createReceptionistConfigService } from "../../src/services/receptionist-config.service.js";
@@ -17,6 +18,7 @@ import {
   createInMemoryBusinessProfileRepository,
   createInMemoryKnowledgeChunkRepository,
   createInMemoryKnowledgeRepository,
+  createInMemoryLeadRepository,
   createInMemoryOrganizationPhoneNumberRepository,
   createInMemoryOrganizationRepositories,
   createInMemoryOrganizationServiceCredentialRepository,
@@ -77,6 +79,7 @@ export function buildTestApp() {
   const receptionistConfigs = createInMemoryReceptionistConfigRepository();
   const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
   const organizationPhoneNumbers = createInMemoryOrganizationPhoneNumberRepository();
+  const leads = createInMemoryLeadRepository();
   const unitOfWork = createInMemoryUnitOfWork({
     organizations,
     memberships,
@@ -93,6 +96,7 @@ export function buildTestApp() {
   const knowledgeService = createKnowledgeService(knowledge, knowledgeChunks, embeddingProvider);
   const receptionistConfigService = createReceptionistConfigService(receptionistConfigs);
   const phoneNumberService = createPhoneNumberService(organizationPhoneNumbers);
+  const leadService = createLeadService(leads);
 
   const deps: Required<AppDependencies> = {
     authService,
@@ -104,6 +108,7 @@ export function buildTestApp() {
     knowledgeService,
     knowledgeChunks,
     embeddingProvider,
+    leadService,
     receptionistConfigService,
     phoneNumberService,
     internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
@@ -125,6 +130,7 @@ export function buildTestApp() {
     services,
     knowledge,
     knowledgeChunks,
+    leads,
     receptionistConfigs,
     organizationServiceCredentials,
     organizationPhoneNumbers,

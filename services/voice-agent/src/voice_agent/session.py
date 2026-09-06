@@ -44,17 +44,21 @@ async def run_session(
     organization_service_token: str,
     transport: BaseTransport,
     settings: Settings,
+    call_sid: str | None = None,
 ) -> None:
     """Runs one session end-to-end.
 
     organization_id is resolved once by the caller (today: bot.py's
-    DEV_SESSION_ORGANIZATION_ID env var; in a future M7 Twilio entry point,
-    whatever the inbound call is routed to) and is never re-derived from
-    anything inside the session — conversation text, LLM output, and tool
-    arguments cannot change which organization this session talks to.
-    tools/search_knowledge.py only ever reads query/category from tool
-    arguments, and pipeline.py binds organization_id once when building the
-    tool schema; this function does not alter that.
+    DEV_SESSION_ORGANIZATION_ID env var; on the M7 Twilio path,
+    routes/twilio.py's verified call credential) and is never re-derived
+    from anything inside the session — conversation text, LLM output, and
+    tool arguments cannot change which organization this session talks to.
+    tools/search_knowledge.py and tools/capture_lead.py only ever read
+    caller-stated content from tool arguments, and pipeline.py binds
+    organization_id (and call_sid) once when building each tool's schema;
+    this function does not alter that. call_sid is the real Twilio call id
+    on the M7 path, None on the WebRTC dev-harness path (bot.py) -- passed
+    through unchanged to build_pipeline().
     """
     session_id = uuid.uuid4().hex[:8]
     started_at = time.monotonic()
@@ -108,6 +112,7 @@ async def run_session(
                 tts=create_tts_service(settings.tts_provider),
                 runtime_context=runtime_context,
                 api_client=api_client,
+                call_sid=call_sid,
             )
         except ProviderConfigurationError as exc:
             logger.error(

@@ -1,13 +1,16 @@
 import type { RuntimeContext, RuntimeKnowledgeEntry } from "@ai-receptionist/shared";
 import type { Request, Response } from "express";
 import { generateCallCredential } from "../auth/call-credential.js";
+import type { NewLead } from "../repositories/lead-types.js";
 import type { OrganizationPhoneNumberRepository } from "../repositories/organization-phone-number-types.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
+import { EmptyLeadError, type LeadService } from "../services/lead.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
 import type { ReceptionistConfigService } from "../services/receptionist-config.service.js";
 import type { ServicesCatalogService } from "../services/services-catalog.service.js";
+import { createLeadSchema } from "../validation/lead.schemas.js";
 import { knowledgeListQuerySchema } from "../validation/knowledge.schemas.js";
 
 export interface InternalControllerDeps {
@@ -16,6 +19,7 @@ export interface InternalControllerDeps {
   businessHoursService: BusinessHoursService;
   servicesCatalogService: ServicesCatalogService;
   knowledgeService: KnowledgeService;
+  leadService: LeadService;
   receptionistConfigService: ReceptionistConfigService;
   organizationPhoneNumbers: OrganizationPhoneNumberRepository;
   twilioCallCredentialSecret: string;
@@ -127,6 +131,54 @@ export function createInternalController(deps: InternalControllerDeps) {
         active: e.active,
       }));
       res.status(200).json({ knowledge });
+    },
+
+    /**
+     * M9 Step 6: the first write-capable internal-API handler. organizationId
+     * comes only from the already-authenticated :organizationId route param
+     * (verified by requireServiceAuth + requireOrganizationAuth before this
+     * handler ever runs -- see routes/internal.routes.ts), never from the
+     * request body -- same discipline as every other handler in this file.
+     * createLeadSchema's own .refine() already rejects a completely empty
+     * lead at 400 before the service is ever reached; the EmptyLeadError
+     * catch below is unreachable via this endpoint today, kept only as the
+     * same belt-and-suspenders defense-in-depth this codebase already uses
+     * elsewhere (see organization.service.ts). No lead content
+     * (contactName/contactPhone/contactEmail/intent/notes/callSid) is ever
+     * logged -- this handler makes no logger call.
+     */
+    async createLead(req: Request, res: Response): Promise<void> {
+      const organizationId = req.params.organizationId as string;
+
+      const parsed = createLeadSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid lead data." });
+        return;
+      }
+
+      // exactOptionalPropertyTypes: an absent key and a key explicitly set
+      // to `undefined` are distinct types -- zod's .optional() infers the
+      // latter, NewLead's fields require the former. Mirrors the same
+      // `if (x !== undefined)` pattern service-catalog.controller.ts's
+      // update handler already uses for this exact class of mismatch.
+      const input: Omit<NewLead, "organizationId" | "status"> = {};
+      if (parsed.data.contactName !== undefined) input.contactName = parsed.data.contactName;
+      if (parsed.data.contactPhone !== undefined) input.contactPhone = parsed.data.contactPhone;
+      if (parsed.data.contactEmail !== undefined) input.contactEmail = parsed.data.contactEmail;
+      if (parsed.data.intent !== undefined) input.intent = parsed.data.intent;
+      if (parsed.data.notes !== undefined) input.notes = parsed.data.notes;
+      if (parsed.data.callSid !== undefined) input.callSid = parsed.data.callSid;
+
+      try {
+        const lead = await deps.leadService.createLead(organizationId, input);
+        res.status(201).json({ lead });
+      } catch (err) {
+        if (err instanceof EmptyLeadError) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        throw err;
+      }
     },
 
     /**

@@ -22,6 +22,7 @@ import {
 } from "./services/business-profile.service.js";
 import { createEmbeddingProvider, type EmbeddingProvider } from "./services/embedding-provider.js";
 import { createKnowledgeService, type KnowledgeService } from "./services/knowledge.service.js";
+import { createLeadService, type LeadService } from "./services/lead.service.js";
 import {
   createOrganizationService,
   type OrganizationService,
@@ -51,6 +52,7 @@ export interface AppDependencies {
   knowledgeChunks?: KnowledgeChunkRepository;
   /** Injected in tests with a fake (deterministic, no-network) provider instead of a real one. */
   embeddingProvider?: EmbeddingProvider;
+  leadService?: LeadService;
   receptionistConfigService?: ReceptionistConfigService;
   phoneNumberService?: PhoneNumberService;
   /** Injected in tests with a fixed test value instead of a real env secret. */
@@ -74,6 +76,7 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.businessHoursService ?? createBusinessHoursService(repos.businessHours);
   const servicesCatalogService =
     deps.servicesCatalogService ?? createServicesCatalogService(repos.services);
+  const leadService = deps.leadService ?? createLeadService(repos.leads);
   const knowledgeChunks = deps.knowledgeChunks ?? repos.knowledgeChunks;
   // M8: constructed once, here, at app startup -- createEmbeddingProvider()
   // validates eagerly (see services/embedding-provider.ts), so a
@@ -135,6 +138,7 @@ export function createApp(deps: AppDependencies = {}): Express {
         businessHoursService,
         servicesCatalogService,
         knowledgeService,
+        leadService,
         receptionistConfigService,
         phoneNumberService,
       },
@@ -144,6 +148,7 @@ export function createApp(deps: AppDependencies = {}): Express {
         businessHoursService,
         servicesCatalogService,
         knowledgeService,
+        leadService,
         receptionistConfigService,
         internalServiceKey,
         organizationServiceCredentials,

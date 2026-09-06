@@ -299,3 +299,44 @@ export const knowledgeChunks = pgTable(
 
 export type KnowledgeChunkRow = typeof knowledgeChunks.$inferSelect;
 export type NewKnowledgeChunkRow = typeof knowledgeChunks.$inferInsert;
+
+/**
+ * M9: structured lead capture from calls -- a caller's contact info,
+ * stated intent, and freeform notes, captured by the voice agent's
+ * capture_lead tool (write-capable, unlike every read-only M5-M8 tool) and
+ * viewed/triaged from the dashboard. Every contact field is nullable: a
+ * caller may give only a phone number, or only a name -- the point is to
+ * record whatever was actually said, not to force completeness (enforced
+ * as "at least one field present" at the validation layer, not here).
+ * callSid is informational only, not a foreign key -- no calls/sessions
+ * table exists in this schema (Twilio call ids are otherwise ephemeral,
+ * see auth/call-credential.ts), so nothing exists yet for it to reference.
+ * status gives a minimal dashboard triage workflow, same enum-with-default
+ * pattern as knowledgeEntries.category. organizationId gets an explicit
+ * secondary index, same reasoning as knowledge_chunks: the first/most
+ * common query is always "list this org's leads".
+ */
+export const leads = pgTable(
+  "leads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contactName: text("contact_name"),
+    contactPhone: text("contact_phone"),
+    contactEmail: text("contact_email"),
+    intent: text("intent"),
+    notes: text("notes"),
+    callSid: text("call_sid"),
+    status: text("status", { enum: ["new", "contacted", "closed"] })
+      .notNull()
+      .default("new"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("leads_organization_id_idx").on(t.organizationId)],
+);
+
+export type LeadRow = typeof leads.$inferSelect;
+export type NewLeadRow = typeof leads.$inferInsert;

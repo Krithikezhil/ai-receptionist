@@ -27,6 +27,7 @@ from pipecat.transports.base_transport import BaseTransport
 from voice_agent.clients.api_client import ApiClient
 from voice_agent.clients.models import RuntimeContext
 from voice_agent.runtime.context import build_system_prompt
+from voice_agent.tools.capture_lead import build_capture_lead_schema
 from voice_agent.tools.search_knowledge import build_search_knowledge_schema
 
 
@@ -38,22 +39,31 @@ def build_pipeline(
     tts: TTSService,
     runtime_context: RuntimeContext,
     api_client: ApiClient,
+    call_sid: str | None = None,
 ) -> Pipeline:
     """Builds one call/session's pipeline.
 
     Called once per connection with that session's already-fetched
     RuntimeContext (see clients/api_client.py) and an ApiClient the
-    search_knowledge tool uses for live queries. Session state (the
-    LLMContext, its aggregators) lives only in this pipeline instance's
-    memory for the connection's lifetime — nothing here is persisted.
+    search_knowledge/capture_lead tools use for live queries/writes.
+    call_sid is the real Twilio call id when this session came from the M7
+    Twilio path (see routes/twilio.py); None on the WebRTC dev-harness path
+    (bot.py), where no real call exists -- capture_lead.py passes it
+    through to apps/api as purely informational, never a foreign key. Session
+    state (the LLMContext, its aggregators) lives only in this pipeline
+    instance's memory for the connection's lifetime — nothing here is
+    persisted.
     """
     search_knowledge_schema = build_search_knowledge_schema(
         api_client, runtime_context.organization_id
     )
+    capture_lead_schema = build_capture_lead_schema(
+        api_client, runtime_context.organization_id, call_sid
+    )
 
     context = LLMContext(
         messages=[{"role": "system", "content": build_system_prompt(runtime_context)}],
-        tools=[search_knowledge_schema],
+        tools=[search_knowledge_schema, capture_lead_schema],
     )
     context_aggregator = LLMContextAggregatorPair(context)
 

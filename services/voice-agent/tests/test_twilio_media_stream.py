@@ -122,7 +122,12 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
     async def fake_run_session(
-        *, organization_id: str, organization_service_token: str, transport: Any, settings: Any
+        *,
+        organization_id: str,
+        organization_service_token: str,
+        transport: Any,
+        settings: Any,
+        call_sid: str | None = None,
     ) -> None:
         calls.append(
             {
