@@ -119,11 +119,16 @@ scope.
 
 ## M8 — Knowledge retrieval / RAG
 
-Extends M4's `knowledge_entries` with chunking and embeddings (a new, additive table — see
-ARCHITECTURE.md §11 for why the M4 schema was deliberately shaped to allow this without a
-redesign) and vector-based retrieval so the voice agent can answer business-specific questions
-from a larger knowledge base than fits in a single prompt. Vector database selection happens at
-the start of this milestone (not decided yet).
+Extends M4's `knowledge_entries` with chunking and embeddings (a new, additive `knowledge_chunks`
+table -- see ARCHITECTURE.md §11 for why the M4 schema was deliberately shaped to allow this
+without a redesign, and §15 for the resulting design) and semantic retrieval so the voice agent
+can answer business-specific questions from a larger knowledge base than fits in a single prompt.
+No vector database was adopted -- embeddings are stored as a plain Postgres `real[]` column and
+ranked in application code via cosine similarity (see ARCHITECTURE.md §15). Steps 1-8 (data
+model, chunking, the provider-agnostic embedding abstraction, ingestion wiring, semantic search, a
+voice-agent-changes review, a full regression run, and a secret/logging scan) are complete and
+CI-verified; documentation and a manual review of real OpenAI embedding quality remain outstanding
+-- see TASKS.md for exact per-step status. This milestone is not yet fully complete.
 
 ## M9 — Lead capture
 

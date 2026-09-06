@@ -309,3 +309,15 @@ actual Deepgram/OpenAI/Cartesia conversation, M6) and a real live Twilio/PSTN ca
 **not** yet been manually verified in this environment — see [TASKS.md](../../TASKS.md),
 [ARCHITECTURE.md §13](../../ARCHITECTURE.md#13-real-ai-voice-runtime-m6), and
 [ARCHITECTURE.md §14](../../ARCHITECTURE.md#14-twilio-inbound-calls-m7).
+
+### M8 addendum
+
+M8 (knowledge chunking, embedding, and semantic search -- in progress) required no changes to any
+file in this directory. `search_knowledge` already calls the same internal `listKnowledge`
+endpoint on `apps/api` it always has; only that endpoint's server-side ranking behavior changed,
+underneath an unchanged route/auth/response contract. Embeddings are stored as a plain Postgres
+`real[]` column on `apps/api`, not a vector database, and are ranked by cosine similarity with a
+substring-match fallback — see
+[ARCHITECTURE.md §15](../../ARCHITECTURE.md#15-knowledge-chunking-embedding-and-semantic-search-m8).
+Only the deterministic `fake` embedding provider has been exercised, including in CI; real OpenAI
+embedding quality has **not** yet been manually verified in this environment.

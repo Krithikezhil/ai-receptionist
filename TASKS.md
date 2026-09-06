@@ -896,7 +896,7 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
   `<Connect><Stream>` TwiML semantics that have not been confirmed against real Twilio traffic;
   `auto_hang_up=True` is the documented fallback if the manual live-call test shows otherwise.
 
-## Completed -- M8 Steps 1-5 (Knowledge Chunking, Embedding, and Semantic Search)
+## Completed -- M8 Steps 1-8 (Knowledge Chunking, Embedding, and Semantic Search)
 
 **Step 1: Data model (`knowledge_chunks`)**
 - [x] `knowledge_chunks` table -- new, additive table referencing `knowledge_entries.id`, per
@@ -926,9 +926,43 @@ None identified as blocking M5's stated scope. Explicitly out of scope by the br
       the internal voice-agent-facing endpoint (`internal.controller.ts`), same route/auth/
       response shape; dashboard's `listKnowledge` unchanged
 
+**Step 6: Voice-agent review**
+- [x] Reviewed `services/voice-agent` for any change M8 might require -- none found;
+      `search_knowledge` already calls the same internal `listKnowledge` endpoint whose
+      server-side ranking behavior changed underneath it. No voice-agent source file touched.
+
+**Step 7: Regression**
+- [x] Full existing test suites re-run: `services/voice-agent` 108/108 passed; `apps/api` reached
+      a clean 206/206 (14/14 files) on a third run, after two earlier runs each hit one
+      intermittent Windows/Vitest worker crash (exit code `0xC0000005`, a different test file each
+      time, otherwise-identical pass counts) -- recorded as an unexplained environmental/
+      test-runner flake, not a code defect; no code changed in response to it.
+
+**Step 8: Secret/logging scan**
+- [x] Five read-only checks across the M8 diff (embedding-provider error paths, ingestion-wiring
+      log calls, search-path log calls, `.env.example` coverage, and a repo-wide grep for the
+      OpenAI key/embedding vectors in log statements) found nothing unsafe logged; found
+      `EMBEDDING_PROVIDER`/`OPENAI_EMBEDDING_MODEL` undocumented in `.env.example` -- recorded as
+      a Step 9 documentation item, not a security issue (both already default safely to `fake`/
+      unset behavior when omitted).
+
+**Step 10 (in progress): pre-commit audit finding**
+- **Pre-existing M6 gap, not an M8 regression.** `mypy --strict` on `services/voice-agent` reports
+      one error: `tests/test_session.py:46: error: Need type annotation for "RUNTIME_CONTEXT_JSON"
+      [var-annotated]`. Confirmed facts (git history): `test_session.py`'s entire commit history
+      is exactly one commit, `65247bb` ("feat: add real AI voice runtime and session lifecycle
+      handling (M6)"); `git blame` attributes line 46 to that same commit; and none of M8's own
+      commits (`5a837ef`, `c49dda2`, `897c1d4`) touch this file -- so the unannotated code itself
+      predates M8. Not independently verified: whether `mypy --strict` actually raised this error
+      back when `65247bb` was committed (would require checking out that historical commit, which
+      was not done). Recorded here as a pre-existing M6 code pattern discovered during the M8
+      Step 10 audit; not fixed as part of M8 Step 10 -- out of scope for this milestone.
+
 Commits `5a837ef` (Steps 1-4) and `c49dda2` (Step 5), both pushed to `origin/main`, CI verified
 green (run [34029628175](https://github.com/Krithikezhil/ai-receptionist/actions/runs/34029628175),
-commit `c49dda2`).
+commit `c49dda2`). Steps 6-8 involved no source changes and no new commits. Steps 9 (documentation),
+10 (pre-commit audit), and 11 (manual review of real OpenAI embedding quality) are not yet
+complete -- M8 is not yet fully done.
 
 ## Future milestones
 

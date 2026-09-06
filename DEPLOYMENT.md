@@ -1,13 +1,17 @@
 # Deployment
 
-Status: **M7 — Twilio inbound calls. Nothing in this repository is deployed anywhere.**
+Status: **M8 — Knowledge retrieval / RAG (in progress). Nothing in this repository is deployed
+anywhere.**
 Production deployment is milestone **M15** in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This document currently covers local
 development only, plus the Docker/Postgres limitation for this environment. M7 additionally
 requires two real public URLs once actually deployed (services/voice-agent's Twilio webhook and
 Media Stream WebSocket, both served from the same `VOICE_AGENT_PUBLIC_BASE_URL`) — no production
 topology for exposing them exists yet; see [services/voice-agent/README.md](services/voice-agent/README.md)
-for the local/ngrok-based manual test setup used instead.
+for the local/ngrok-based manual test setup used instead. M8 adds no new deployment requirement --
+the default `EMBEDDING_PROVIDER=fake` needs nothing beyond what M1 already requires; only opting
+into `EMBEDDING_PROVIDER=openai` requires the same `OPENAI_API_KEY` apps/api and
+services/voice-agent may both read (see `.env.example`).
 
 ## Local development
 

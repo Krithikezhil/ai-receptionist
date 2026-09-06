@@ -5,19 +5,23 @@ conversations, business-specific knowledge, lead capture, appointment booking, S
 human call transfers, call transcripts/summaries, business analytics, usage tracking, and Stripe
 subscriptions.
 
-**Status: M7 — Twilio inbound calls.** None of the product features above (leads,
-appointments, billing, etc.) are implemented yet. This repository currently contains the M1
-monorepo foundation, M2 authentication (real accounts, sessions), M3 organizations (business
+**Status: M8 — Knowledge retrieval / RAG (in progress).** None of the product features above
+(leads, appointments, billing, etc.) are implemented yet. This repository currently contains the
+M1 monorepo foundation, M2 authentication (real accounts, sessions), M3 organizations (business
 profile, weekly hours, service catalog), M4 (an authenticated organization member can manage a
 knowledge base and configure a provider-agnostic AI receptionist), M5 — a Pipecat conversational
 pipeline in `services/voice-agent`, a service-authenticated internal API on `apps/api` for it to
 read a tenant's config/knowledge, and one read-only knowledge-search tool — M6, which wires real
 Deepgram/OpenAI/Cartesia providers into that pipeline, adds turn-taking detection, and hardens
-session lifecycle handling (idle timeout, provider-error handling, disconnect handling), and M7,
-which bridges a real inbound Twilio phone call into that exact runtime via a signature-validated
-webhook and a credential-authenticated Media Stream WebSocket. Real-provider behavior (M6) and a
-real live Twilio/PSTN call (M7) have **not** yet been manually verified in this environment (no
-provider or Twilio credentials available) — see TASKS.md.
+session lifecycle handling (idle timeout, provider-error handling, disconnect handling), M7, which
+bridges a real inbound Twilio phone call into that exact runtime via a signature-validated webhook
+and a credential-authenticated Media Stream WebSocket, and M8 (in progress), which adds
+per-organization knowledge chunking, a provider-agnostic embedding abstraction, and
+cosine-similarity-ranked semantic search for the voice agent's internal knowledge lookup --
+embeddings are stored as a plain Postgres `real[]` column, not a vector database, and the
+dashboard's own knowledge search is unchanged. Real-provider behavior (M6), a real live
+Twilio/PSTN call (M7), and real OpenAI embedding quality (M8) have **not** yet been manually
+verified in this environment (no provider or Twilio credentials available) -- see TASKS.md.
 No SMS, no outbound calling, no leads, no appointments, no billing — see [TASKS.md](TASKS.md) for
 exactly what exists today and [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the full
 milestone sequence (M1–M15).
@@ -147,11 +151,16 @@ Per-workspace equivalents: `npm run <script> -w apps/web`, `-w apps/api`, `-w pa
 * No fine-grained RBAC — any organization member (owner or plain member) currently has full
   read/write access to that organization's configuration. See [SECURITY.md](SECURITY.md).
 * No SIP, no production WebRTC infrastructure, no Stripe, no Google Calendar, no SMS, no
-  outbound calling, no RAG/vector database/embeddings. See
-  [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for when each lands. The receptionist
-  configuration is provider-agnostic and always created disabled — enabling it in the UI does not
-  connect to any AI provider or phone number by itself (a phone number must also be separately
-  provisioned to an organization, M7).
+  outbound calling, no vector database. See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for
+  when each remaining item lands. The receptionist configuration is provider-agnostic and always
+  created disabled — enabling it in the UI does not connect to any AI provider or phone number by
+  itself (a phone number must also be separately provisioned to an organization, M7).
+* Knowledge chunking, embedding, and semantic search exist structurally (M8, in progress:
+  chunking/embedding/ingestion/ranking implemented and CI-verified with the deterministic `fake`
+  embedding provider; documentation and a manual review of real OpenAI embedding quality are not
+  yet complete) -- embeddings are stored as a plain Postgres `real[]` column, not a vector
+  database, and are used only by the voice agent's internal knowledge lookup; the dashboard's own
+  knowledge search is unchanged. See [TASKS.md](TASKS.md).
 * Twilio inbound calling exists structurally (M7: webhook signature validation, phone-number
   lookup, call-credential-authenticated Media Stream bridge, reusing the unmodified M6 runtime)
   but **a real live call has not yet been manually verified** in this environment — no real

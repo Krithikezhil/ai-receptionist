@@ -394,7 +394,11 @@ milestone adds chunking/embeddings as a **new, additive** table referencing this
 No web crawling / website-derived ingestion (out of scope — this is manual-entry only). Search is
 a simple case-insensitive substring match (`ilike` in Postgres, plain `.includes()` in the
 in-memory test double) against title + content, exposed via `?q=` on the list endpoint — not
-Postgres full-text search, not embeddings, not an external search service.
+Postgres full-text search, not embeddings, not an external search service. §15 implemented that
+predicted chunking/embeddings table -- `knowledge_chunks` -- as additive, non-redesigning schema
+exactly as anticipated here; this paragraph's substring search remains accurate and unchanged,
+since §15's semantic ranking is used only by the internal, voice-agent-facing endpoint, not this
+dashboard-facing search.
 
 **Receptionist configuration** (`apps/api/src/db/schema.ts#receptionistConfigurations`): one row
 per organization (`organizationId` itself unique, same pattern as `business_profiles`).
@@ -890,3 +894,110 @@ unauthenticated attempt, not how many can happen concurrently — left to a futu
 milestone); `auto_hang_up=False` relies on documented `<Connect><Stream>` TwiML semantics that
 have not been confirmed against a real Twilio call. A real live Twilio/PSTN call has **not** yet
 been manually verified in this environment — see TASKS.md.
+
+## 15. Knowledge Chunking, Embedding, and Semantic Search (M8)
+
+M8's goal: let the voice agent answer questions from a knowledge base larger than fits in a
+single prompt, by chunking each knowledge entry, embedding the chunks, and ranking search results
+by semantic similarity -- without touching the dashboard's own knowledge CRUD/search behavior
+(§11) or any voice-agent source code. Full test coverage and known limitations live in
+[TASKS.md](TASKS.md); this section covers the design.
+
+### 15.1 Data model: `real[]`, not a vector database
+
+`knowledge_chunks` (`apps/api/src/db/schema.ts`) is a new, additive table -- exactly the
+extension point §11 reserved -- with `knowledgeEntryId` and `organizationId` as two independent,
+single-column foreign keys (no composite FK; see §15.3 for why that matters), `chunkIndex`,
+`content`, and a nullable `embedding` column typed as a plain Postgres `real[]` (a fixed-size
+array of 32-bit floats), plus an explicit secondary index on `organizationId`.
+
+No pgvector extension and no external vector database were adopted. This was an evidence-based
+decision, not a default: no existing knowledge query in this codebase paginates, the target market
+is single-location SMBs/local businesses (a knowledge base of dozens to low hundreds of entries,
+not millions), and knowledge entry is manual-entry-only (§11) -- so an exact, in-application
+cosine-similarity scan over one organization's chunks is well within budget, and a dedicated
+vector index would add operational complexity (a new extension or external service) with no
+measurable benefit at this scale. `EMBEDDING_DIMENSIONS = 1536` is fixed and shared by every
+provider (§15.2), so a stored vector's length is always known and interchangeable regardless of
+which provider produced it.
+
+### 15.2 Chunking and the embedding provider abstraction
+
+`chunkKnowledgeContent()` (`apps/api/src/services/knowledge-chunking.ts`) is a pure function:
+paragraph-first splitting, falling back to sentence boundaries and then a hard character split for
+punctuation-free overlength text, with a default `maxChunkLength` of 800 characters.
+
+`EmbeddingProvider` (`apps/api/src/services/embedding-provider.ts`) is a small provider-agnostic
+interface -- `embed(texts: string[]): Promise<number[][]>` -- with two implementations selected by
+the `EMBEDDING_PROVIDER` env var: `"fake"` (deterministic, SHA-256-based, no network -- the
+default everywhere, including CI) and `"openai"` (opt-in only, direct REST via `fetch`, no SDK
+dependency). Two distinct error types separate setup-time from runtime failure:
+`EmbeddingConfigurationError` (bad provider name, missing key/model -- expected to fail at app
+construction, via `createEmbeddingProvider()`'s eager validation, never at request time) and
+`EmbeddingProviderError` (network/HTTP/response-parsing failures, including a wrapped `fetch()` or
+`response.json()` rejection -- a runtime condition the ingestion path explicitly handles, §15.3).
+
+### 15.3 Ingestion wiring and tenant ownership
+
+`KnowledgeService.createKnowledge`/`updateKnowledge` (`apps/api/src/services/knowledge.service.ts`)
+chunk and batch-embed a knowledge entry's content automatically through a private `reembedEntry()`
+helper; an update whose changes omit `content` (metadata-only) skips re-embedding entirely.
+`deleteKnowledge` explicitly calls `KnowledgeChunkRepository.deleteByKnowledgeEntryId` rather than
+relying solely on the schema's `ON DELETE CASCADE`, so cleanup behavior is identical and testable
+against both the real repository and the in-memory test double. If embedding fails at write time
+with an `EmbeddingProviderError`, the write still succeeds -- chunks are persisted with
+`embedding: null` and the failure is logged as a warning (organization id, knowledge entry id,
+chunk count, and the error's own message only -- never request/response contents); any other,
+unexpected error still propagates and fails the request.
+
+Because `knowledge_chunks` has two independent single-column foreign keys rather than one
+composite `(knowledgeEntryId, organizationId)` key, nothing at the schema level alone prevents a
+chunk row from referencing a knowledge entry belonging to a *different* organization than the one
+named in its own `organizationId` column. `replaceChunksForKnowledgeEntry`
+(`drizzle/knowledge-chunk.repository.ts`) closes this gap explicitly: the real implementation
+verifies ownership via a `SELECT` inside the same DB transaction as the delete/insert; the
+in-memory double performs the equivalent check via an injected `KnowledgeRepository` reference
+(used for this ownership check only -- not for cascade-delete, which is handled at the service
+layer above, not invented as fake-only behavior).
+
+### 15.4 Semantic search
+
+`knowledge-search.ts` (`apps/api/src/services/knowledge-search.ts`) is pure, I/O-free ranking
+logic: `cosineSimilarity(a, b)` (throws on mismatched vector lengths, returns 0 for a zero vector)
+and `rankKnowledgeEntries(queryVector, query, candidates, limit = DEFAULT_KNOWLEDGE_SEARCH_LIMIT)`,
+default limit 5. An entry with at least one chunk carrying a non-null embedding is scored by its
+best (max) chunk similarity; an entry with no usable-embedding chunks falls back to a
+case-insensitive substring match against its title/content -- semantic results always sort before
+fallback results, and the combined list is capped at `limit` (fallback results cannot push the
+list past the cap). If embedding the query itself fails, every candidate is evaluated via the
+substring fallback only.
+
+`KnowledgeService.searchKnowledge(organizationId, filter)` is the only caller of this ranking
+logic. An empty/missing `filter.q` delegates identically to the unmodified `listKnowledge` (no
+embedding call at all). Otherwise it fetches candidates via the existing, unmodified
+`KnowledgeRepository.listByOrganizationId` (category/active filters only -- no repository change
+was needed), fetches the organization's chunks via a new
+`KnowledgeChunkRepository.listByOrganizationId`, embeds the query, and ranks. It is wired into
+exactly one place -- `internal.controller.ts`'s `listKnowledge` handler, the endpoint
+`services/voice-agent`'s `search_knowledge` tool calls -- with the same route, auth, and response
+shape as before. The dashboard's own `knowledge.controller.ts`, its `list` handler, and
+`KnowledgeRepository` itself are unchanged; substring search (§11) remains the dashboard's only
+search behavior.
+
+### 15.5 What stayed frozen
+
+No voice-agent source file changed -- `search_knowledge` already calls the same internal
+`listKnowledge` endpoint it always has; only that endpoint's server-side ranking behavior changed,
+which is exactly the kind of change the tool's own black-box contract already tolerated. No new
+migration tool, no pgvector extension, no external search/vector service, no dashboard UI change,
+no hybrid keyword+vector scoring (semantic and substring results are sequenced, not blended into
+one score).
+
+### 15.6 Known limitations
+
+Only the deterministic `"fake"` embedding provider has been exercised, including in CI; real
+OpenAI embedding quality (relevance of `rankKnowledgeEntries`'s cosine-similarity ordering against
+genuine embeddings) has **not** been manually verified in this environment. No pagination or
+result-count cap beyond `DEFAULT_KNOWLEDGE_SEARCH_LIMIT = 5` exists for the underlying
+per-organization chunk scan -- acceptable at today's target scale (§15.1) but not evaluated
+against a much larger knowledge base. See TASKS.md for current per-step status.

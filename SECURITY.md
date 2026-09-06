@@ -1,11 +1,12 @@
 # Security
 
-Status: **M7 — Twilio inbound calls**, building on M1–M6. This document covers (a) the
-multi-tenant isolation strategy and what actually enforces it, (b) the authentication/session
-security design, (c) the M5 service-to-service authentication design and its M7 extension (§8,
-§10), and (d) the security posture of what actually exists today. Full security hardening/testing
-is milestone **M14** in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps
-growing with each milestone that adds real attack surface (payment handling in M13, etc.).
+Status: **M8 — Knowledge retrieval / RAG (in progress)**, building on M1–M7. This document
+covers (a) the multi-tenant isolation strategy and what actually enforces it, (b) the
+authentication/session security design, (c) the M5 service-to-service authentication design and
+its M7 extension (§8, §10), and (d) the security posture of what actually exists today, including
+the M8 knowledge-chunk tenant-ownership design (§11). Full security hardening/testing is milestone
+**M14** in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md); this document keeps growing with each
+milestone that adds real attack surface (payment handling in M13, etc.).
 
 ## 1. Multi-tenant isolation
 
@@ -548,3 +549,36 @@ is the authoritative security summary.
 * **Not yet performed**: a real live Twilio/PSTN call, in this or any environment — no real Twilio
   account was available during implementation. Structural/unit verification only. Tracked as
   outstanding in TASKS.md, never assumed to work.
+
+## 11. Knowledge chunk tenant ownership and embedding provider security (M8)
+
+Full design lives in
+[ARCHITECTURE.md §15](ARCHITECTURE.md#15-knowledge-chunking-embedding-and-semantic-search-m8);
+this section covers only the security-relevant parts.
+
+* **No new authentication surface.** M8 adds no new route, no new middleware, and no new
+  credential type. `internal.controller.ts`'s `listKnowledge` handler -- the only caller of the
+  new ranked search -- keeps the exact same route, the same `requireServiceAuth` +
+  `requireOrganizationServiceToken`/`requireOrganizationAuth` chain (§8, §10), and the same
+  response shape as before M8.
+* **Tenant ownership without a composite foreign key.** `knowledge_chunks` has two independent
+  single-column foreign keys (`knowledgeEntryId`, `organizationId`), not one composite key, so the
+  schema alone does not guarantee a chunk's `organizationId` matches the organization that owns
+  its `knowledgeEntryId`. `replaceChunksForKnowledgeEntry` closes this gap explicitly: the real
+  repository verifies ownership via a `SELECT` inside the same DB transaction as the delete/insert;
+  every call site passes both ids from data already scoped to a single organization elsewhere in
+  the request. See ARCHITECTURE.md §15.3.
+* **Embedding-provider failures never expose secrets.** `EmbeddingProviderError`'s message
+  (logged on a degraded write, or a degraded search -- ARCHITECTURE.md §15.3/§15.4) is the only
+  provider-originated detail ever logged; a Step 8 review of the M8 code paths confirmed no
+  request body, response body, or the OpenAI API key itself is ever passed to `logger`. The
+  logged fields are limited to organization id, knowledge entry id (write path) or nothing
+  entry-identifying (search path), chunk count, and the error's own `.message`.
+* **Graceful degradation is an availability trade-off, not a tenant-isolation bypass.** A failing
+  embedding provider degrades a write (chunks persisted with `embedding: null`) or a search
+  (substring-fallback-only results) rather than failing the request outright -- every fallback
+  path still operates only within the requesting organization's own already-scoped data.
+* **Known, accepted limitation**: only the deterministic `"fake"` embedding provider has been
+  exercised, including in CI; the real `"openai"` REST integration's error handling has
+  unit-level coverage (malformed responses, network failure) but has not been exercised against
+  the real OpenAI API in this environment.
