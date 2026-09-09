@@ -95,3 +95,51 @@ class PhoneNumberLookup(_CamelModel):
 
     organization_id: str
     call_credential: str
+
+
+class AvailabilityResult(_CamelModel):
+    """GET /internal/v1/organizations/:id/appointments/availability response
+    (M10 Step 7). `status` covers every outcome the endpoint can return
+    WITHOUT apps/api/src/controllers/internal.controller.ts's
+    checkAppointmentAvailability raising a non-2xx (service_not_found /
+    invalid_date / invalid_time / invalid_timezone all map to a raised
+    ApiClientError instead -- see ApiClient.check_availability below)."""
+
+    status: Literal["ok", "calendar_not_connected", "calendar_unavailable"]
+    slots: list[str] = []
+    requested_time_available: bool | None = None
+    alternatives: list[str] | None = None
+
+
+class BookedAppointmentSummary(_CamelModel):
+    """The minimal slice of apps/api's full Appointment row a voice call
+    actually needs -- deliberately not a full mirror of every column (no
+    id/customer fields surfaced back to the LLM). Verified against the real
+    Appointment interface (apps/api/src/repositories/appointment-types.ts)
+    and internal.controller.ts's bookAppointment handler, which returns
+    `{ appointment: result.appointment }` with zero transformation -- the
+    wire field names are startTime/endTime (Date -> ISO string via
+    JSON.stringify), which _CamelModel's alias_generator maps to
+    start_time/end_time here. Extra fields (id, customerName, etc.) are
+    silently ignored by pydantic's default extra="ignore" behavior."""
+
+    start_time: str
+    end_time: str
+
+
+class BookAppointmentResult(_CamelModel):
+    """POST /internal/v1/organizations/:id/appointments response (M10 Step
+    7). "unavailable"/"duplicate_booking" (409) are reachable because
+    ApiClient.book_appointment() opts those two statuses out of _post()'s
+    default raise-on-non-2xx behavior -- see api_client.py. Every other
+    non-2xx (400/404/500) still raises ApiClientError, unchanged."""
+
+    status: Literal[
+        "booked",
+        "unavailable",
+        "duplicate_booking",
+        "calendar_not_connected",
+        "calendar_unavailable",
+    ]
+    alternatives: list[str] | None = None
+    appointment: BookedAppointmentSummary | None = None

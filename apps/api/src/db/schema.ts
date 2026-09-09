@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
   numeric,
@@ -8,6 +10,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -340,3 +343,174 @@ export const leads = pgTable(
 
 export type LeadRow = typeof leads.$inferSelect;
 export type NewLeadRow = typeof leads.$inferInsert;
+
+/**
+ * M10: appointment bookings, made only by the voice agent's book_appointment
+ * tool against the existing service catalog -- serviceId is NOT NULL and
+ * ON DELETE RESTRICT (a service with appointment history cannot be deleted;
+ * deactivate it via services.active instead, which already exists). endTime
+ * is always server-computed from service.durationMinutes, never client-
+ * supplied. status mirrors leads.status's enum-with-default pattern.
+ * callSid is informational only, identical reasoning to leads.callSid.
+ * googleEventId is null only transiently within one booking request (see
+ * services/appointment.service.ts's booking-ordering design, M10 Step 4) --
+ * a scheduled/confirmed row always has one once a request completes
+ * successfully; there is deliberately no separate sync-status column (see
+ * the approved M10 plan's "no sync-status field unless genuinely required"
+ * decision).
+ *
+ * organizationId gets both a plain secondary index (every other org-owned
+ * table's convention) and a composite (organizationId, startTime) index for
+ * availability-window queries.
+ *
+ * Concurrency: overlapping active appointments for the same organization are
+ * additionally prevented by a PostgreSQL EXCLUDE constraint
+ * (appointments_no_overlap) added BY HAND in this table's migration file --
+ * Drizzle's schema API has no representation for PostgreSQL EXCLUDE
+ * constraints or extension declarations (verified directly against the
+ * installed drizzle-orm 0.45.2 / drizzle-kit 0.31.10 source: no
+ * exclude-constraint module exists in pg-core, and no `CREATE EXTENSION`
+ * capability exists anywhere in either package). That constraint is
+ * therefore NOT expressible here and will NOT be regenerated or
+ * drift-detected by any future `drizzle-kit generate` run -- it is tracked
+ * only in the migration SQL file itself and this comment. See the migration
+ * file's own header comment for the full disclosure.
+ */
+export const appointments = pgTable(
+  "appointments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    serviceId: uuid("service_id")
+      .notNull()
+      .references(() => services.id, { onDelete: "restrict" }),
+    customerName: text("customer_name"),
+    customerPhone: text("customer_phone"),
+    customerEmail: text("customer_email"),
+    notes: text("notes"),
+    startTime: timestamp("start_time", { withTimezone: true }).notNull(),
+    endTime: timestamp("end_time", { withTimezone: true }).notNull(),
+    status: text("status", {
+      enum: ["scheduled", "confirmed", "cancelled", "completed", "no_show"],
+    })
+      .notNull()
+      .default("scheduled"),
+    callSid: text("call_sid"),
+    googleEventId: text("google_event_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("appointments_organization_id_idx").on(t.organizationId),
+    index("appointments_organization_id_start_time_idx").on(t.organizationId, t.startTime),
+  ],
+);
+
+export type AppointmentRow = typeof appointments.$inferSelect;
+export type NewAppointmentRow = typeof appointments.$inferInsert;
+
+/**
+ * M10: at most one Google Calendar connection per organization
+ * (organizationId itself is the primary key -- same "one row per org, no
+ * synthetic id" pattern as organization_service_credentials, since this
+ * table holds a credential too). Only the refresh token is persisted
+ * (access tokens are short-lived and re-minted on demand at call time), and
+ * only in encrypted form: refreshTokenCiphertext holds
+ * base64(IV || authTag || ciphertext), AES-256-GCM, encrypted/decrypted
+ * exclusively by services/calendar-connection.service.ts (M10 Step 4) --
+ * no controller or repository ever handles plaintext. status distinguishes
+ * a working connection from one Google has revoked (invalid_grant), so a
+ * booking failure can be attributed correctly without ever storing or
+ * logging the token itself. No calendarId column -- v1 always uses the
+ * connected account's primary calendar (see the approved M10 plan).
+ */
+export const organizationCalendarConnections = pgTable("organization_calendar_connections", {
+  organizationId: uuid("organization_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  googleAccountEmail: text("google_account_email").notNull(),
+  refreshTokenCiphertext: text("refresh_token_ciphertext").notNull(),
+  status: text("status", { enum: ["connected", "needs_reauthorization"] })
+    .notNull()
+    .default("connected"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type OrganizationCalendarConnectionRow =
+  typeof organizationCalendarConnections.$inferSelect;
+export type NewOrganizationCalendarConnectionRow =
+  typeof organizationCalendarConnections.$inferInsert;
+
+/**
+ * M11 Step 1: durable, at-most-once SMS notification queue. Exactly one of
+ * appointmentId/leadId is set per row -- enforced at the database level via
+ * the exactly-one-entity CHECK constraint below, not by application code,
+ * matching this schema's existing precedent of treating cross-row/cross-
+ * column invariants (see appointments_no_overlap) as DB-level guarantees.
+ *
+ * next_attempt_at defaults to now(): under the approved M11 architecture,
+ * every row is only ever inserted at the moment it is already due --
+ * confirmations/lead-confirmations immediately after their triggering
+ * event, and reminders lazily materialized by the worker only once their
+ * own due window has arrived. No insertion path in this design ever needs
+ * a genuinely future initial due time; retries set a future value via a
+ * later UPDATE, which is unaffected by this INSERT-time default.
+ *
+ * The two partial unique indexes are this table's actual idempotency
+ * guarantee -- a second attempt to enqueue the same (type, entity) pair
+ * collides at the database level rather than relying on an application-
+ * level check-then-insert race.
+ *
+ * Repository/service/worker code is deliberately NOT part of this step --
+ * see M11 Step 2 onward.
+ */
+export const smsNotifications = pgTable(
+  "sms_notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    notificationType: text("notification_type", {
+      enum: ["appointment_confirmation", "appointment_reminder", "lead_confirmation"],
+    }).notNull(),
+    appointmentId: uuid("appointment_id").references(() => appointments.id, {
+      onDelete: "cascade",
+    }),
+    leadId: uuid("lead_id").references(() => leads.id, { onDelete: "cascade" }),
+    destinationPhone: text("destination_phone").notNull(),
+    status: text("status", {
+      enum: ["pending", "processing", "sent", "failed", "skipped"],
+    })
+      .notNull()
+      .default("pending"),
+    providerMessageSid: text("provider_message_sid"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    lastAttemptedAt: timestamp("last_attempted_at", { withTimezone: true }),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    failureReason: text("failure_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("sms_notifications_organization_id_idx").on(t.organizationId),
+    index("sms_notifications_status_next_attempt_at_idx").on(t.status, t.nextAttemptAt),
+    uniqueIndex("sms_notifications_type_appointment_id_idx")
+      .on(t.notificationType, t.appointmentId)
+      .where(sql`${t.appointmentId} IS NOT NULL`),
+    uniqueIndex("sms_notifications_type_lead_id_idx")
+      .on(t.notificationType, t.leadId)
+      .where(sql`${t.leadId} IS NOT NULL`),
+    check(
+      "sms_notifications_exactly_one_entity",
+      sql`(${t.appointmentId} IS NOT NULL) <> (${t.leadId} IS NOT NULL)`,
+    ),
+  ],
+);
+
+export type SmsNotificationRow = typeof smsNotifications.$inferSelect;
+export type NewSmsNotificationRow = typeof smsNotifications.$inferInsert;

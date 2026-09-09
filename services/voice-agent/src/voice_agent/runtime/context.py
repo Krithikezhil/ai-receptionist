@@ -18,6 +18,9 @@ organization's own configured RuntimeContext fields, never hardcoded here.
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from voice_agent.clients.models import RuntimeContext
 
 _DAY_NAMES = (
@@ -69,6 +72,20 @@ def build_system_prompt(context: RuntimeContext) -> str:
             lines.append(f"Address: {profile.address}.")
         if profile.phone:
             lines.append(f"Phone: {profile.phone}.")
+        # M10 Step 7: computed fresh at prompt-build time -- never
+        # hardcoded -- so check_availability/book_appointment's date/time
+        # arguments ("today", "tomorrow", etc.) can be interpreted
+        # correctly. Omitted entirely (not a fallback to UTC) when the
+        # timezone is missing or invalid, matching this function's existing
+        # conditional-omission convention for business_profile/open_days.
+        try:
+            now = datetime.now(ZoneInfo(profile.timezone))
+            lines.append(
+                f"Today's date is {now.strftime('%A, %Y-%m-%d')} in the business's "
+                f"timezone ({profile.timezone})."
+            )
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
 
     open_days = [
         f"{_DAY_NAMES[hours.day_of_week]} {hours.open_time}-{hours.close_time}"

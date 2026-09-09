@@ -15,6 +15,15 @@ declare global {
        * set this.
        */
       serviceAuthenticatedVia?: "call_credential";
+      /**
+       * M10 Step 7: the call credential's own verified call_sid claim --
+       * only ever set on the M7 call-credential path, never on the M5
+       * per-organization long-lived-token fallback (that credential
+       * carries no call_sid concept at all, so this stays undefined there).
+       * Authoritative over anything a request body claims, whenever it is
+       * set -- see controllers/internal.controller.ts's bookAppointment.
+       */
+      verifiedCallSid?: string;
     }
   }
 }
@@ -72,6 +81,7 @@ export function requireOrganizationAuth(
       const result = verifyCallCredential(provided, organizationId, callCredentialSecret);
       if (result.valid) {
         req.serviceAuthenticatedVia = "call_credential";
+        req.verifiedCallSid = result.callSid;
         next();
         return;
       }

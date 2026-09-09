@@ -4,6 +4,7 @@ import type {
   LeadStatusUpdate,
   NewLead,
 } from "../repositories/lead-types.js";
+import type { SmsNotificationService } from "./sms-notification.service.js";
 
 export interface LeadService {
   listLeads(organizationId: string): Promise<Lead[]>;
@@ -40,7 +41,10 @@ export interface LeadService {
  */
 export class EmptyLeadError extends Error {}
 
-export function createLeadService(repo: LeadRepository): LeadService {
+export function createLeadService(
+  repo: LeadRepository,
+  smsNotificationService: SmsNotificationService,
+): LeadService {
   return {
     async listLeads(organizationId) {
       return repo.listByOrganizationId(organizationId);
@@ -62,7 +66,15 @@ export function createLeadService(repo: LeadRepository): LeadService {
       // callSid, if present, passes through unchanged -- informational
       // only, not a foreign key, not validated against any calls table
       // (none exists -- see db/schema.ts's own comment on leads.callSid).
-      return repo.create({ ...input, organizationId });
+      const lead = await repo.create({ ...input, organizationId });
+
+      // M11 Step 3: fire-and-forget-safe -- scheduleLeadConfirmation never
+      // throws (SmsNotificationService absorbs all failures internally,
+      // including logging any unexpected one), so awaiting it here cannot
+      // turn this already-successful lead creation into a failure.
+      await smsNotificationService.scheduleLeadConfirmation(lead);
+
+      return lead;
     },
 
     async updateLeadStatus(organizationId, leadId, changes) {

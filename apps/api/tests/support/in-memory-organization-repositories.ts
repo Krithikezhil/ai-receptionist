@@ -1,4 +1,16 @@
 import { randomUUID } from "node:crypto";
+import {
+  ACTIVE_APPOINTMENT_STATUSES,
+  AppointmentOverlapError,
+  type Appointment,
+  type AppointmentRepository,
+  type NewAppointment,
+} from "../../src/repositories/appointment-types.js";
+import type {
+  NewOrganizationCalendarConnection,
+  OrganizationCalendarConnection,
+  OrganizationCalendarConnectionRepository,
+} from "../../src/repositories/calendar-connection-types.js";
 import type {
   KnowledgeChunk,
   KnowledgeChunkRepository,
@@ -41,6 +53,14 @@ import type {
   ReceptionistConfigRepository,
   ReceptionistConfiguration,
 } from "../../src/repositories/receptionist-config-types.js";
+import {
+  DuplicateSmsNotificationError,
+  SmsNotificationEntityReferenceError,
+  type NewSmsNotification,
+  type SmsNotification,
+  type SmsNotificationRepository,
+  type SmsNotificationStatusUpdate,
+} from "../../src/repositories/sms-notification-types.js";
 import type { OrganizationCreationRepos, UnitOfWork } from "../../src/repositories/unit-of-work.js";
 
 /**
@@ -510,6 +530,233 @@ export function createInMemoryUnitOfWork(repos: OrganizationCreationRepos): Unit
     // No real transaction semantics needed for a single-threaded test double.
     async run(fn) {
       return fn(repos);
+    },
+  };
+}
+
+export function createInMemoryAppointmentRepository(): AppointmentRepository {
+  const items = new Map<string, Appointment>();
+
+  function overlapsActiveAppointment(
+    organizationId: string,
+    startTime: Date,
+    endTime: Date,
+  ): boolean {
+    for (const item of items.values()) {
+      if (item.organizationId !== organizationId) continue;
+      if (!ACTIVE_APPOINTMENT_STATUSES.includes(item.status)) continue;
+      if (startTime < item.endTime && item.startTime < endTime) return true;
+    }
+    return false;
+  }
+
+  return {
+    async listByOrganizationId(organizationId) {
+      return [...items.values()].filter((a) => a.organizationId === organizationId);
+    },
+    async findByIdAndOrganizationId(id, organizationId) {
+      const item = items.get(id);
+      return item && item.organizationId === organizationId ? item : undefined;
+    },
+    async create(newAppointment: NewAppointment) {
+      // Mirrors the real `appointments_no_overlap` PostgreSQL EXCLUDE
+      // constraint (see db/schema.ts, migrations/0007_kind_kingpin.sql) --
+      // a real Postgres insert would throw the same AppointmentOverlapError
+      // here too (translated from error code 23P01 in
+      // drizzle/appointment.repository.ts).
+      if (
+        overlapsActiveAppointment(
+          newAppointment.organizationId,
+          newAppointment.startTime,
+          newAppointment.endTime,
+        )
+      ) {
+        throw new AppointmentOverlapError(
+          "Requested appointment time overlaps an existing appointment for this organization.",
+        );
+      }
+
+      const now = new Date();
+      const appointment: Appointment = {
+        id: randomUUID(),
+        organizationId: newAppointment.organizationId,
+        serviceId: newAppointment.serviceId,
+        customerName: newAppointment.customerName ?? null,
+        customerPhone: newAppointment.customerPhone ?? null,
+        customerEmail: newAppointment.customerEmail ?? null,
+        notes: newAppointment.notes ?? null,
+        startTime: newAppointment.startTime,
+        endTime: newAppointment.endTime,
+        status: newAppointment.status ?? "scheduled",
+        callSid: newAppointment.callSid ?? null,
+        googleEventId: newAppointment.googleEventId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      items.set(appointment.id, appointment);
+      return appointment;
+    },
+    async updateGoogleEventId(id, organizationId, googleEventId) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return undefined;
+      const updated = { ...existing, googleEventId, updatedAt: new Date() };
+      items.set(id, updated);
+      return updated;
+    },
+    async updateStatus(id, organizationId, changes) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return undefined;
+      const updated = { ...existing, ...changes, updatedAt: new Date() };
+      items.set(id, updated);
+      return updated;
+    },
+    async deleteByIdAndOrganizationId(id, organizationId) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return false;
+      items.delete(id);
+      return true;
+    },
+  };
+}
+
+export function createInMemoryOrganizationCalendarConnectionRepository(): OrganizationCalendarConnectionRepository {
+  const connections = new Map<string, OrganizationCalendarConnection>();
+
+  return {
+    async findByOrganizationId(organizationId) {
+      return connections.get(organizationId);
+    },
+    async upsert(newConnection: NewOrganizationCalendarConnection) {
+      const existing = connections.get(newConnection.organizationId);
+      const now = new Date();
+      const connection: OrganizationCalendarConnection = {
+        organizationId: newConnection.organizationId,
+        googleAccountEmail: newConnection.googleAccountEmail,
+        refreshTokenCiphertext: newConnection.refreshTokenCiphertext,
+        status: newConnection.status ?? "connected",
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      connections.set(connection.organizationId, connection);
+      return connection;
+    },
+    async updateStatus(organizationId, changes) {
+      const existing = connections.get(organizationId);
+      if (!existing) return undefined;
+      const updated = { ...existing, ...changes, updatedAt: new Date() };
+      connections.set(organizationId, updated);
+      return updated;
+    },
+    async deleteByOrganizationId(organizationId) {
+      return connections.delete(organizationId);
+    },
+  };
+}
+
+export function createInMemorySmsNotificationRepository(): SmsNotificationRepository {
+  const items = new Map<string, SmsNotification>();
+
+  function hasDuplicate(notification: NewSmsNotification): boolean {
+    for (const item of items.values()) {
+      if (item.notificationType !== notification.notificationType) continue;
+      if (
+        notification.appointmentId !== undefined &&
+        item.appointmentId === notification.appointmentId
+      ) {
+        return true;
+      }
+      if (notification.leadId !== undefined && item.leadId === notification.leadId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return {
+    async findByIdAndOrganizationId(id, organizationId) {
+      const item = items.get(id);
+      return item && item.organizationId === organizationId ? item : undefined;
+    },
+    async create(notification: NewSmsNotification) {
+      // Mirrors the real sms_notifications_exactly_one_entity CHECK
+      // constraint and the two partial unique indexes (see db/schema.ts)
+      // -- a real Postgres insert would throw the same typed errors here
+      // too (translated in drizzle/sms-notification.repository.ts).
+      // NewSmsNotification's XOR shape only prevents this at compile
+      // time for well-typed callers; there is no database here to
+      // enforce it at runtime, so this check is not optional.
+      const hasAppointment = notification.appointmentId !== undefined;
+      const hasLead = notification.leadId !== undefined;
+      if (hasAppointment === hasLead) {
+        throw new SmsNotificationEntityReferenceError(
+          "A notification must reference exactly one appointment or lead, not both or neither.",
+        );
+      }
+      if (hasDuplicate(notification)) {
+        throw new DuplicateSmsNotificationError(
+          "A notification of this type already exists for this appointment or lead.",
+        );
+      }
+
+      const now = new Date();
+      const item: SmsNotification = {
+        id: randomUUID(),
+        organizationId: notification.organizationId,
+        notificationType: notification.notificationType,
+        appointmentId: notification.appointmentId ?? null,
+        leadId: notification.leadId ?? null,
+        destinationPhone: notification.destinationPhone,
+        status: "pending",
+        providerMessageSid: null,
+        attemptCount: 0,
+        claimedAt: null,
+        lastAttemptedAt: null,
+        nextAttemptAt: now,
+        failureReason: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      items.set(item.id, item);
+      return item;
+    },
+    async claimDue(limit) {
+      // Single-threaded test double -- no real concurrent callers exist,
+      // so there is nothing here to race with. This mirrors the
+      // reasoning already documented on UnitOfWork's in-memory
+      // implementation (see unit-of-work.ts): the Drizzle implementation
+      // is what actually has to be concurrency-safe (see
+      // drizzle/sms-notification.repository.ts's FOR UPDATE SKIP LOCKED
+      // claim); this double only needs to reproduce the same observable
+      // *result* -- pending+due rows, oldest-due-first, up to `limit`,
+      // transitioned to processing with claimedAt/lastAttemptedAt set
+      // and attemptCount incremented.
+      const now = new Date();
+      const due = [...items.values()]
+        .filter((item) => item.status === "pending" && item.nextAttemptAt <= now)
+        .sort((a, b) => a.nextAttemptAt.getTime() - b.nextAttemptAt.getTime())
+        .slice(0, limit);
+
+      const claimed: SmsNotification[] = [];
+      for (const item of due) {
+        const updated: SmsNotification = {
+          ...item,
+          status: "processing",
+          claimedAt: now,
+          lastAttemptedAt: now,
+          attemptCount: item.attemptCount + 1,
+          updatedAt: now,
+        };
+        items.set(item.id, updated);
+        claimed.push(updated);
+      }
+      return claimed;
+    },
+    async updateStatus(id, organizationId, update: SmsNotificationStatusUpdate) {
+      const existing = items.get(id);
+      if (!existing || existing.organizationId !== organizationId) return undefined;
+      const updated = { ...existing, ...update, updatedAt: new Date() };
+      items.set(id, updated);
+      return updated;
     },
   };
 }

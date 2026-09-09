@@ -355,3 +355,260 @@ async def test_phone_number_lookup_unexpected_status_raises_generic_api_client_e
             "CA123",
             transport=httpx.MockTransport(handler),
         )
+
+
+@pytest.mark.asyncio
+async def test_check_availability_sends_service_id_date_and_optional_time() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json={"status": "ok", "slots": ["09:00", "09:15"]})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.check_availability(
+            ORG_ID, service_id="service-1", date="2026-06-01", time="09:00"
+        )
+
+    assert seen == {"serviceId": "service-1", "date": "2026-06-01", "time": "09:00"}
+    assert result.status == "ok"
+    assert result.slots == ["09:00", "09:15"]
+
+
+@pytest.mark.asyncio
+async def test_check_availability_omits_time_when_not_given() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json={"status": "ok", "slots": []})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.check_availability(ORG_ID, service_id="service-1", date="2026-06-01")
+
+    assert seen == {"serviceId": "service-1", "date": "2026-06-01"}
+
+
+@pytest.mark.asyncio
+async def test_check_availability_parses_calendar_not_connected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "calendar_not_connected"})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.check_availability(ORG_ID, service_id="service-1", date="2026-06-01")
+
+    assert result.status == "calendar_not_connected"
+    assert result.slots == []
+
+
+@pytest.mark.asyncio
+async def test_check_availability_parses_requested_time_available_and_alternatives() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "slots": ["09:00"],
+                "requestedTimeAvailable": False,
+                "alternatives": ["09:00", "09:15"],
+            },
+        )
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.check_availability(
+            ORG_ID, service_id="service-1", date="2026-06-01", time="10:00"
+        )
+
+    assert result.requested_time_available is False
+    assert result.alternatives == ["09:00", "09:15"]
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_sends_only_provided_fields() -> None:
+    seen_body: dict[str, object] = {}
+    seen_path = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_path
+        seen_path = request.url.path
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(
+            201,
+            json={
+                "appointment": {
+                    "id": "appt-1",
+                    "startTime": "2026-06-01T09:00:00.000Z",
+                    "endTime": "2026-06-01T09:30:00.000Z",
+                }
+            },
+        )
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.book_appointment(
+            ORG_ID,
+            service_id="service-1",
+            date="2026-06-01",
+            time="09:00",
+            customer_name="Jane Caller",
+        )
+
+    assert seen_path == f"/internal/v1/organizations/{ORG_ID}/appointments"
+    assert seen_body == {
+        "serviceId": "service-1",
+        "date": "2026-06-01",
+        "time": "09:00",
+        "customerName": "Jane Caller",
+    }
+    assert result.status == "booked"
+    assert result.appointment is not None
+    assert result.appointment.start_time == "2026-06-01T09:00:00.000Z"
+    assert result.appointment.end_time == "2026-06-01T09:30:00.000Z"
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_normalizes_the_asymmetric_booked_response() -> None:
+    """apps/api returns {"appointment": {...}} with no top-level "status" for
+    a successful booking, unlike every other outcome -- this must be
+    normalized into a consistent BookAppointmentResult(status="booked", ...)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            json={
+                "appointment": {
+                    "id": "appt-1",
+                    "customerName": "Jane Caller",
+                    "startTime": "2026-06-01T09:00:00.000Z",
+                    "endTime": "2026-06-01T09:30:00.000Z",
+                }
+            },
+        )
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.book_appointment(
+            ORG_ID,
+            service_id="service-1",
+            date="2026-06-01",
+            time="09:00",
+            customer_name="Jane Caller",
+        )
+
+    assert result.status == "booked"
+    # Only start_time/end_time are surfaced -- customerName etc. are silently
+    # ignored by BookedAppointmentSummary, keeping the LLM-facing surface minimal.
+    assert result.appointment is not None
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_409_unavailable_returns_alternatives() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409, json={"status": "unavailable", "alternatives": ["10:00", "10:15"]}
+        )
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.book_appointment(
+            ORG_ID, service_id="service-1", date="2026-06-01", time="09:00", customer_name="Jane"
+        )
+
+    assert result.status == "unavailable"
+    assert result.alternatives == ["10:00", "10:15"]
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_409_duplicate_booking_does_not_raise() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"status": "duplicate_booking"})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.book_appointment(
+            ORG_ID, service_id="service-1", date="2026-06-01", time="09:00", customer_name="Jane"
+        )
+
+    assert result.status == "duplicate_booking"
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_400_still_raises_generic_api_client_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "Invalid appointment data."})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiClientError):
+            await client.book_appointment(
+                ORG_ID,
+                service_id="service-1",
+                date="2026-06-01",
+                time="09:00",
+                customer_name="Jane",
+            )
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_500_still_raises_generic_api_client_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "Failed to complete the booking."})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiClientError):
+            await client.book_appointment(
+                ORG_ID,
+                service_id="service-1",
+                date="2026-06-01",
+                time="09:00",
+                customer_name="Jane",
+            )
+
+
+@pytest.mark.asyncio
+async def test_create_lead_409_still_raises_generic_api_client_error() -> None:
+    """Proves the new ok_statuses parameter on _post() defaults to empty and
+    leaves every OTHER existing caller's behavior completely unchanged --
+    create_lead never opts a 409 out of the default raise-on-non-2xx path."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "conflict"})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiClientError):
+            await client.create_lead(ORG_ID, contact_name="Jane Caller")
+
+
+@pytest.mark.asyncio
+async def test_book_appointment_403_raises_api_forbidden_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "Not authorized for this organization."})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiForbiddenError):
+            await client.book_appointment(
+                ORG_ID,
+                service_id="service-1",
+                date="2026-06-01",
+                time="09:00",
+                customer_name="Jane",
+            )

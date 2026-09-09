@@ -96,3 +96,37 @@ async def test_build_pipeline_includes_a_vad_stage() -> None:
         processor_names = [type(p).__name__ for p in pipeline.processors]
         assert "VADProcessor" in processor_names
         assert processor_names.index("VADProcessor") < processor_names.index("FakeSTTService")
+
+
+@pytest.mark.asyncio
+async def test_build_pipeline_registers_all_four_tools() -> None:
+    """M10 Step 7: check_availability/book_appointment must be registered
+    alongside the existing search_knowledge/capture_lead tools. The
+    LLMContext aggregator exposes the built context (and its .tools) via a
+    public `.context` property -- see
+    pipecat.processors.aggregators.llm_response_universal."""
+    async with ApiClient(
+        "http://internal-api.test",
+        "test-key",
+        ORG_TOKEN,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    ) as api_client:
+        pipeline = build_pipeline(
+            transport=_FakeTransport(),
+            stt=FakeSTTService(),
+            llm=FakeLLMService(),
+            tts=FakeTTSService(),
+            runtime_context=_fake_runtime_context(),
+            api_client=api_client,
+        )
+
+        context_aggregators = [p for p in pipeline.processors if hasattr(p, "context")]
+        assert context_aggregators, "no context aggregator found among pipeline.processors"
+
+        tool_names = {tool.name for tool in context_aggregators[0].context.tools.standard_tools}
+        assert tool_names == {
+            "search_knowledge",
+            "capture_lead",
+            "check_availability",
+            "book_appointment",
+        }

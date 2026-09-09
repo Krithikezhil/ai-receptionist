@@ -1066,6 +1066,129 @@ complete.
       and remain valid evidence of correctness at the unit/integration level. That coverage is not
       a substitute for the real-infrastructure verification described above.
 
+## M10 -- Appointment booking (in progress)
+
+**Step 1: Data model (`appointments`, `organization_calendar_connections`)**
+- [x] `appointments` table (organization/service FKs, nullable customer contact fields, status enum
+      `scheduled|confirmed|cancelled|completed|no_show`, `call_sid`/`google_event_id` unmanaged
+      foreign keys) plus a hand-authored `EXCLUDE USING gist` constraint appended to the generated
+      migration -- Drizzle has no schema-builder representation for Postgres exclusion constraints
+      or `CREATE EXTENSION`; the exception is narrow and documented in both the schema comment and
+      the migration's own header. `organization_calendar_connections` mirrors
+      `organization_service_credentials`'s one-row-per-org shape.
+
+**Step 2: Repository layer**
+- [x] `AppointmentRepository`/`OrganizationCalendarConnectionRepository` (Drizzle + in-memory test
+      doubles); `create()` translates the Postgres exclusion-constraint violation (`23P01`) into a
+      typed `AppointmentOverlapError`.
+
+**Step 3: Validation**
+- [x] `appointment.schemas.ts` -- date/time shape validation only (DST/calendar correctness is
+      Step 4's responsibility), field caps matching `lead.schemas.ts`'s existing precedent.
+
+**Step 4: Services**
+- [x] `google-token-crypto.ts` -- AES-256-GCM refresh-token encryption, strict two-part base64 key
+      validation (rejects what Node's lenient `Buffer.from(str,"base64")` would silently accept).
+- [x] `appointment-time.ts` -- pure timezone/DST helpers, including a custom +/-24-hour
+      offset-bracketing algorithm for detecting nonexistent (spring-forward) and ambiguous
+      (fall-back) local times, empirically verified against real 2026 `America/New_York` DST
+      transition dates (Luxon itself does not detect either case).
+- [x] `calendar-connection.service.ts`/`google-calendar-client-types.ts` -- the credential
+      boundary: `GoogleCalendarClient` receives only a short-lived access token, never a refresh
+      token; `CalendarConnectionService` owns the entire token lifecycle internally.
+- [x] `appointment.service.ts` -- availability computation against both business hours and live
+      Google FreeBusy, booking-write ordering with compensating rollback on partial failure,
+      duplicate-booking hard-block by `call_sid`+`service_id`+`start_time`.
+
+**Step 5: Dashboard API**
+- [x] `GET/PATCH /organizations/:id/appointments` (status-update-only, cancellation transitions
+      enforced in the service, not the schema); `GET/POST/DELETE /organizations/:id/calendar`,
+      connect/disconnect owner-gated.
+
+**Step 6: Google OAuth real implementation**
+- [x] File 1 -- `google-calendar-client.ts`: native `fetch` only, no SDK; FreeBusy parsing fails
+      closed on any calendar-level `errors` value (including a present-but-malformed one).
+- [x] File 2 -- `calendar-connection.service.ts` restructured: `completeOAuthConnection()` owns the
+      entire authorization-code exchange (token endpoint -> userinfo endpoint -> encrypt -> persist)
+      internally; the old `connect()` (confirmed zero callers before removal) is gone.
+- [x] File 3 -- `auth/oauth-state.ts` (HMAC-SHA256, 10-minute TTL, binds organization + dashboard
+      user, explicitly documented as NOT a server-side one-time-use nonce); `connect()`/
+      `handleOAuthCallback()` in `calendar-connection.controller.ts`; `routes/oauth.routes.ts`
+      mounts the fixed, auth-free `GET /oauth/google/callback`.
+- [x] File 4 -- `app.ts` wired to the real `createGoogleCalendarClient()`; `.env.example` documents
+      the five real `GOOGLE_OAUTH_*`/`GOOGLE_TOKEN_ENCRYPTION_KEY` vars. Two logging-leak gaps
+      found and fixed during this step: `httpRequestSerializer` strips the query string from
+      `/oauth/*` request URLs and blanks the serialized `query` object (pino-http hands custom
+      request serializers the already-serialized object, not the raw request -- confirmed
+      empirically); `res.headers.location` added to `redact` after finding the OAuth `connect()`
+      redirect would otherwise log the signed state token via the `Location` header.
+- [x] Tests: `oauth-state.test.ts` (22), `google-calendar-client.test.ts` (26),
+      `oauth-flow.test.ts` (18), `http-request-serializer.test.ts` (9),
+      `logger-redaction.test.ts` (7, exercising the real logger singleton end to end via a
+      `vi.hoisted()` stdout-capture fix rather than a reconstructed/duplicated redact config) --
+      82/82 passing.
+
+**Outstanding**
+- [x] **Step 7 (voice-agent booking tool: `check_availability`/`book_appointment` tools, related
+      internal API endpoints) implemented and verified.**
+- [x] **Real-infrastructure manual verification performed and confirmed end-to-end** -- a real
+      PostgreSQL instance, a real Google OAuth consent screen, and real Google Calendar API calls
+      (availability, booking, and cancellation) have all been exercised successfully.
+
+## M11 -- SMS confirmations and reminders (in progress)
+
+**Step 1: Data model (`sms_notifications`)**
+- [x] `sms_notifications` table -- nullable `appointment_id`/`lead_id` FKs (`ON DELETE cascade`),
+      a `CHECK` constraint enforcing exactly one of the two is set, two partial unique indexes
+      (`(notification_type, appointment_id)` / `(notification_type, lead_id)`, each
+      `WHERE ... IS NOT NULL`) preventing duplicate scheduling, `status` enum
+      `pending|processing|sent|failed|skipped`, `next_attempt_at timestamptz NOT NULL DEFAULT
+      now()` (every row, confirmations and lazily-materialized reminders alike, is only ever
+      inserted already-due). Both the `CHECK` and the partial `uniqueIndex().where()` are
+      genuinely supported by the installed `drizzle-orm`/`drizzle-kit` versions (confirmed by
+      direct source inspection) -- unlike M10's `EXCLUDE` constraint, no hand-authored SQL was
+      needed; migration `0008_lonely_captain_midlands.sql` generated as-is. Real-database
+      constraint behavior (both the CHECK and both unique indexes) verified against a live
+      PostgreSQL instance.
+
+**Step 2: Repository layer**
+- [x] `SmsNotificationRepository` (Drizzle + in-memory test double); `create()` translates
+      `23505`/`23514` into typed `DuplicateSmsNotificationError`/`SmsNotificationEntityReferenceError`;
+      `claimDue()` atomically claims due rows via `SELECT ... FOR UPDATE SKIP LOCKED` inside a
+      transaction, matching the existing job-queue-claim precedent. `NewSmsNotification`'s
+      appointment-XOR-lead shape is enforced at the type level with zero casts. Verified:
+      `npm run typecheck -w apps/api` clean (only pre-existing, unrelated M10 errors remained);
+      157/157 existing tests passing unchanged.
+
+**Step 3: Service layer and SMS-confirmation test coverage**
+- [x] `SmsNotificationService` (`scheduleAppointmentConfirmation`/`scheduleLeadConfirmation`) --
+      never throws: a duplicate is a silent no-op, any other failure is logged
+      (`logger.warn`, mirroring `knowledge.service.ts`'s existing precedent) and absorbed, so it
+      can never turn an already-successful booking or lead creation into a failure. Wired into
+      `AppointmentService`/`LeadService` (called immediately before their own success return) and
+      into `app.ts`. A missing customer phone/contact phone schedules no row at all (no schema
+      change, no placeholder row).
+- [x] Test coverage: a new, narrowly-injected `FakeCalendarConnectionService`
+      (`tests/support/fake-calendar-connection-service.ts`) lets `AppointmentService` reach a real
+      `"booked"` result deterministically in tests, with no network call -- the public OAuth
+      router keeps using the real `CalendarConnectionService` unchanged, so `oauth-flow.test.ts`'s
+      existing real encrypt/decrypt/network-exchange coverage is untouched. Four new HTTP-level
+      tests added to `internal-api.test.ts` (two for appointment booking, two for lead capture)
+      exercise the real HTTP -> middleware -> controller -> service -> `SmsNotificationService` ->
+      in-memory `smsNotifications` repository path: a phone-present booking/lead schedules exactly
+      one correctly-typed, correctly-associated notification; a phone-absent one schedules none.
+      A first targeted run of `internal-api.test.ts` hit the same intermittent Windows/Vitest
+      worker-process crash already documented under M9 Step 4/Step 10
+      (`STATUS_ACCESS_VIOLATION`, exit code `3221226505`/`0xC0000005`) after 25/42 tests had
+      already passed with zero assertion failures; one authorized rerun completed cleanly, 42/42.
+      Recorded as a non-reproduced flake, consistent with the existing M9 precedent, not an M11
+      regression. **Final verification: full `apps/api` suite -- 20/20 test files, 313/313 tests
+      passed, no regressions.**
+
+**Outstanding**
+- [ ] Step 4 (SMS-sending worker, Twilio client, `claimDue()`-driven send loop, delivery-status
+      webhook, STOP/opt-out handling, reminder scheduling) -- not yet started.
+
 ## Future milestones
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M8 through M15.

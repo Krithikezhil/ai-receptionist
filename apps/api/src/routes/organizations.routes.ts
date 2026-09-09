@@ -1,6 +1,8 @@
 import { Router } from "express";
+import { createAppointmentController } from "../controllers/appointment.controller.js";
 import { createBusinessHoursController } from "../controllers/business-hours.controller.js";
 import { createBusinessProfileController } from "../controllers/business-profile.controller.js";
+import { createCalendarConnectionController } from "../controllers/calendar-connection.controller.js";
 import { createKnowledgeController } from "../controllers/knowledge.controller.js";
 import { createLeadController } from "../controllers/lead.controller.js";
 import { createOrganizationController } from "../controllers/organization.controller.js";
@@ -10,9 +12,11 @@ import { createServiceCatalogController } from "../controllers/service-catalog.c
 import { requireAuth } from "../middleware/require-auth.js";
 import { requireOrgMembership } from "../middleware/require-org-membership.js";
 import type { MembershipRepository } from "../repositories/organization-types.js";
+import type { AppointmentService } from "../services/appointment.service.js";
 import type { AuthService } from "../services/auth.service.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
+import type { CalendarConnectionService } from "../services/calendar-connection.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
 import type { LeadService } from "../services/lead.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
@@ -31,6 +35,8 @@ export interface OrganizationRouterDeps {
   leadService: LeadService;
   receptionistConfigService: ReceptionistConfigService;
   phoneNumberService: PhoneNumberService;
+  appointmentService: AppointmentService;
+  calendarConnectionService: CalendarConnectionService;
 }
 
 export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router {
@@ -46,6 +52,8 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   const leads = createLeadController(deps.leadService);
   const receptionistConfig = createReceptionistConfigController(deps.receptionistConfigService);
   const phoneNumbers = createPhoneNumberController(deps.phoneNumberService);
+  const appointments = createAppointmentController(deps.appointmentService);
+  const calendarConnection = createCalendarConnectionController(deps.calendarConnectionService);
 
   router.post("/", auth, org.create);
   router.get("/", auth, org.list);
@@ -90,6 +98,27 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
     membership,
     phoneNumbers.remove,
   );
+
+  // M10 Step 5: dashboard-only, status-update-only -- no POST here
+  // (appointments are only ever created by the voice agent's
+  // book_appointment tool, a later M10 step). PATCH only supports
+  // cancellation -- enforced inside the controller, not the schema (see
+  // appointment.controller.ts).
+  router.get("/:organizationId/appointments", auth, membership, appointments.list);
+  router.patch(
+    "/:organizationId/appointments/:appointmentId",
+    auth,
+    membership,
+    appointments.updateStatus,
+  );
+
+  // M10 Step 5: connect/disconnect additionally require the owner role --
+  // enforced inside the controller (same pattern as phone-numbers above).
+  // POST is a deliberate Step 5 placeholder (501) until Step 6 implements
+  // the real Google OAuth start flow.
+  router.get("/:organizationId/calendar", auth, membership, calendarConnection.getStatus);
+  router.post("/:organizationId/calendar", auth, membership, calendarConnection.connect);
+  router.delete("/:organizationId/calendar", auth, membership, calendarConnection.disconnect);
 
   return router;
 }

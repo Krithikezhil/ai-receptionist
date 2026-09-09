@@ -62,6 +62,19 @@ export function createInternalRouter(deps: InternalRouterDeps): Router {
     controller.createLead,
   );
   router.get("/twilio/phone-numbers/:phoneNumber", serviceAuth, controller.lookupPhoneNumber);
+  // M10 Step 7: same two-stage auth chain as every route above.
+  router.get(
+    "/organizations/:organizationId/appointments/availability",
+    serviceAuth,
+    organizationAuth,
+    controller.checkAppointmentAvailability,
+  );
+  router.post(
+    "/organizations/:organizationId/appointments",
+    serviceAuth,
+    organizationAuth,
+    controller.bookAppointment,
+  );
 
   return router;
 }

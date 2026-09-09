@@ -1,7 +1,9 @@
 import { createApp, type AppDependencies } from "../../src/app.js";
+import { createAppointmentService } from "../../src/services/appointment.service.js";
 import { createAuthService } from "../../src/services/auth.service.js";
 import { createBusinessHoursService } from "../../src/services/business-hours.service.js";
 import { createBusinessProfileService } from "../../src/services/business-profile.service.js";
+import { createCalendarConnectionService } from "../../src/services/calendar-connection.service.js";
 import { createEmbeddingProvider } from "../../src/services/embedding-provider.js";
 import { createKnowledgeService } from "../../src/services/knowledge.service.js";
 import { createLeadService } from "../../src/services/lead.service.js";
@@ -9,23 +11,29 @@ import { createOrganizationService } from "../../src/services/organization.servi
 import { createPhoneNumberService } from "../../src/services/phone-number.service.js";
 import { createReceptionistConfigService } from "../../src/services/receptionist-config.service.js";
 import { createServicesCatalogService } from "../../src/services/services-catalog.service.js";
+import { createSmsNotificationService } from "../../src/services/sms-notification.service.js";
 import {
   createInMemorySessionRepository,
   createInMemoryUserRepository,
 } from "./in-memory-repositories.js";
 import {
+  createInMemoryAppointmentRepository,
   createInMemoryBusinessHoursRepository,
   createInMemoryBusinessProfileRepository,
   createInMemoryKnowledgeChunkRepository,
   createInMemoryKnowledgeRepository,
   createInMemoryLeadRepository,
+  createInMemoryOrganizationCalendarConnectionRepository,
   createInMemoryOrganizationPhoneNumberRepository,
   createInMemoryOrganizationRepositories,
   createInMemoryOrganizationServiceCredentialRepository,
   createInMemoryReceptionistConfigRepository,
   createInMemoryServiceRepository,
+  createInMemorySmsNotificationRepository,
   createInMemoryUnitOfWork,
 } from "./in-memory-organization-repositories.js";
+import { createFakeGoogleCalendarClient } from "./fake-google-calendar-client.js";
+import { createFakeCalendarConnectionService } from "./fake-calendar-connection-service.js";
 
 /**
  * Builds a full Express app wired to in-memory repositories instead of
@@ -80,6 +88,11 @@ export function buildTestApp() {
   const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
   const organizationPhoneNumbers = createInMemoryOrganizationPhoneNumberRepository();
   const leads = createInMemoryLeadRepository();
+  const appointments = createInMemoryAppointmentRepository();
+  const organizationCalendarConnections = createInMemoryOrganizationCalendarConnectionRepository();
+  const smsNotifications = createInMemorySmsNotificationRepository();
+  const googleCalendarClient = createFakeGoogleCalendarClient();
+  const fakeCalendarConnectionService = createFakeCalendarConnectionService();
   const unitOfWork = createInMemoryUnitOfWork({
     organizations,
     memberships,
@@ -96,7 +109,18 @@ export function buildTestApp() {
   const knowledgeService = createKnowledgeService(knowledge, knowledgeChunks, embeddingProvider);
   const receptionistConfigService = createReceptionistConfigService(receptionistConfigs);
   const phoneNumberService = createPhoneNumberService(organizationPhoneNumbers);
-  const leadService = createLeadService(leads);
+  const smsNotificationService = createSmsNotificationService(smsNotifications);
+  const leadService = createLeadService(leads, smsNotificationService);
+  const calendarConnectionService = createCalendarConnectionService(organizationCalendarConnections);
+  const appointmentService = createAppointmentService(
+    appointments,
+    services,
+    businessProfiles,
+    businessHours,
+    fakeCalendarConnectionService,
+    googleCalendarClient,
+    smsNotificationService,
+  );
 
   const deps: Required<AppDependencies> = {
     authService,
@@ -111,6 +135,8 @@ export function buildTestApp() {
     leadService,
     receptionistConfigService,
     phoneNumberService,
+    appointmentService,
+    calendarConnectionService,
     internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
     organizationServiceCredentials,
     organizationPhoneNumbers,
@@ -131,6 +157,11 @@ export function buildTestApp() {
     knowledge,
     knowledgeChunks,
     leads,
+    appointments,
+    organizationCalendarConnections,
+    smsNotifications,
+    googleCalendarClient,
+    fakeCalendarConnectionService,
     receptionistConfigs,
     organizationServiceCredentials,
     organizationPhoneNumbers,

@@ -27,7 +27,9 @@ from pipecat.transports.base_transport import BaseTransport
 from voice_agent.clients.api_client import ApiClient
 from voice_agent.clients.models import RuntimeContext
 from voice_agent.runtime.context import build_system_prompt
+from voice_agent.tools.book_appointment import build_book_appointment_schema
 from voice_agent.tools.capture_lead import build_capture_lead_schema
+from voice_agent.tools.check_availability import build_check_availability_schema
 from voice_agent.tools.search_knowledge import build_search_knowledge_schema
 
 
@@ -60,10 +62,21 @@ def build_pipeline(
     capture_lead_schema = build_capture_lead_schema(
         api_client, runtime_context.organization_id, call_sid
     )
+    check_availability_schema = build_check_availability_schema(
+        api_client, runtime_context.organization_id, runtime_context.services
+    )
+    book_appointment_schema = build_book_appointment_schema(
+        api_client, runtime_context.organization_id, call_sid, runtime_context.services
+    )
 
     context = LLMContext(
         messages=[{"role": "system", "content": build_system_prompt(runtime_context)}],
-        tools=[search_knowledge_schema, capture_lead_schema],
+        tools=[
+            search_knowledge_schema,
+            capture_lead_schema,
+            check_availability_schema,
+            book_appointment_schema,
+        ],
     )
     context_aggregator = LLMContextAggregatorPair(context)
 

@@ -8,8 +8,13 @@ hardcoded. No network, no real credentials.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
+import pytest
+
+import voice_agent.runtime.context as context_module
 from voice_agent.clients.models import (
     BusinessProfile,
     ReceptionistConfig,
@@ -107,3 +112,82 @@ def test_prompt_never_hardcodes_a_specific_business_vertical() -> None:
     ).lower()
     for vertical in ("restaurant", "salon", "dental", "clinic", "repair shop", "retail store"):
         assert vertical not in prompt
+
+
+def test_prompt_includes_todays_date_and_timezone_when_business_profile_has_a_valid_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uses a monkeypatched ZoneInfo lookup rather than depending on real
+    IANA tzdata being installed on the machine running this test -- Windows
+    has no OS-level zoneinfo database, and this project does not depend on
+    the separate `tzdata` PyPI package (see the discovered gap flagged in
+    this session's implementation report). This test verifies
+    build_system_prompt's own code path (a valid timezone -> the date line
+    is appended), not the OS's timezone database."""
+    monkeypatch.setattr(context_module, "ZoneInfo", lambda key: UTC)
+
+    prompt = build_system_prompt(
+        _context(
+            business_profile=BusinessProfile(
+                business_name="Acme Co",
+                description=None,
+                phone=None,
+                email=None,
+                website=None,
+                address=None,
+                timezone="America/New_York",
+            )
+        )
+    )
+    assert "Today's date is" in prompt
+    assert "America/New_York" in prompt
+
+
+def test_prompt_includes_todays_date_using_the_real_installed_tzdata() -> None:
+    expected_now = datetime.now(ZoneInfo("America/New_York"))
+    expected_date = expected_now.strftime("%A, %Y-%m-%d")
+
+    prompt = build_system_prompt(
+        _context(
+            business_profile=BusinessProfile(
+                business_name="Acme Co",
+                description=None,
+                phone=None,
+                email=None,
+                website=None,
+                address=None,
+                timezone="America/New_York",
+            )
+        )
+    )
+
+    assert "Today's date is" in prompt
+    assert expected_date in prompt
+    assert "America/New_York" in prompt
+
+
+def test_prompt_omits_the_date_line_when_business_profile_is_absent() -> None:
+    """Existing conditional-omission precedent, re-confirmed for the new
+    date/timezone line specifically -- business_profile=None is the default
+    in _context()."""
+    prompt = build_system_prompt(_context())
+    assert "Today's date is" not in prompt
+
+
+def test_prompt_omits_the_date_line_when_the_configured_timezone_is_invalid() -> None:
+    """Fails closed -- never fabricates a date or falls back to UTC when the
+    configured timezone string isn't a real IANA zone."""
+    prompt = build_system_prompt(
+        _context(
+            business_profile=BusinessProfile(
+                business_name="Acme Co",
+                description=None,
+                phone=None,
+                email=None,
+                website=None,
+                address=None,
+                timezone="Not/A_Real_Zone",
+            )
+        )
+    )
+    assert "Today's date is" not in prompt

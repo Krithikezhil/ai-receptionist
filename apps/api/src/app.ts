@@ -4,13 +4,14 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import helmet from "helmet";
 import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
-import { logger } from "./config/logger.js";
+import { httpRequestSerializer, logger } from "./config/logger.js";
 import type { KnowledgeChunkRepository } from "./repositories/knowledge-chunk-types.js";
 import type { OrganizationPhoneNumberRepository } from "./repositories/organization-phone-number-types.js";
 import type { OrganizationServiceCredentialRepository } from "./repositories/organization-service-credential-types.js";
 import type { MembershipRepository } from "./repositories/organization-types.js";
 import { createRepositories } from "./repositories/index.js";
 import { createApiRouter } from "./routes/index.js";
+import { createAppointmentService, type AppointmentService } from "./services/appointment.service.js";
 import { createAuthService, type AuthService } from "./services/auth.service.js";
 import {
   createBusinessHoursService,
@@ -20,7 +21,12 @@ import {
   createBusinessProfileService,
   type BusinessProfileService,
 } from "./services/business-profile.service.js";
+import {
+  createCalendarConnectionService,
+  type CalendarConnectionService,
+} from "./services/calendar-connection.service.js";
 import { createEmbeddingProvider, type EmbeddingProvider } from "./services/embedding-provider.js";
+import { createGoogleCalendarClient } from "./services/google-calendar-client.js";
 import { createKnowledgeService, type KnowledgeService } from "./services/knowledge.service.js";
 import { createLeadService, type LeadService } from "./services/lead.service.js";
 import {
@@ -39,6 +45,7 @@ import {
   createServicesCatalogService,
   type ServicesCatalogService,
 } from "./services/services-catalog.service.js";
+import { createSmsNotificationService } from "./services/sms-notification.service.js";
 
 export interface AppDependencies {
   /** Injected in tests to avoid needing a real Postgres connection. */
@@ -55,6 +62,8 @@ export interface AppDependencies {
   leadService?: LeadService;
   receptionistConfigService?: ReceptionistConfigService;
   phoneNumberService?: PhoneNumberService;
+  calendarConnectionService?: CalendarConnectionService;
+  appointmentService?: AppointmentService;
   /** Injected in tests with a fixed test value instead of a real env secret. */
   internalServiceKey?: string;
   organizationServiceCredentials?: OrganizationServiceCredentialRepository;
@@ -76,7 +85,13 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.businessHoursService ?? createBusinessHoursService(repos.businessHours);
   const servicesCatalogService =
     deps.servicesCatalogService ?? createServicesCatalogService(repos.services);
-  const leadService = deps.leadService ?? createLeadService(repos.leads);
+  // M11 Step 3: constructed once, here, from the existing repository
+  // bundle -- shared by both leadService and appointmentService below, no
+  // new repository instance, no AppDependencies change (nothing above
+  // these two services needs direct access to it).
+  const smsNotificationService = createSmsNotificationService(repos.smsNotifications);
+  const leadService =
+    deps.leadService ?? createLeadService(repos.leads, smsNotificationService);
   const knowledgeChunks = deps.knowledgeChunks ?? repos.knowledgeChunks;
   // M8: constructed once, here, at app startup -- createEmbeddingProvider()
   // validates eagerly (see services/embedding-provider.ts), so a
@@ -120,13 +135,43 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.twilioCallCredentialSecret ?? env.twilioCallCredentialSecret ?? randomBytes(32).toString("hex");
   const phoneNumberService =
     deps.phoneNumberService ?? createPhoneNumberService(organizationPhoneNumbers);
+  const calendarConnectionService =
+    deps.calendarConnectionService ??
+    createCalendarConnectionService(repos.organizationCalendarConnections);
+  const appointmentService =
+    deps.appointmentService ??
+    createAppointmentService(
+      repos.appointments,
+      repos.services,
+      repos.businessProfiles,
+      repos.businessHours,
+      calendarConnectionService,
+      // Real production client -- native fetch only, no SDK, receives only
+      // short-lived access tokens (see google-calendar-client.ts's own
+      // security boundary comment). GOOGLE_OAUTH_CLIENT_ID/SECRET,
+      // GOOGLE_OAUTH_REDIRECT_URI, GOOGLE_OAUTH_STATE_SECRET, and
+      // GOOGLE_TOKEN_ENCRYPTION_KEY are all read lazily, per-request, by
+      // the modules that actually need them -- not asserted here at boot,
+      // matching TWILIO_CALL_CREDENTIAL_SECRET's optional-per-deployment
+      // precedent, since Google Calendar integration is optional per
+      // deployment.
+      createGoogleCalendarClient(),
+      smsNotificationService,
+    );
 
   const app = express();
 
   app.use(helmet());
   app.use(cors({ origin: env.corsOrigin, credentials: true }));
   app.use(express.json());
-  app.use(pinoHttp({ logger }));
+  app.use(
+    pinoHttp({
+      logger,
+      serializers: {
+        req: httpRequestSerializer,
+      },
+    }),
+  );
 
   app.use(
     createApiRouter(
@@ -141,6 +186,8 @@ export function createApp(deps: AppDependencies = {}): Express {
         leadService,
         receptionistConfigService,
         phoneNumberService,
+        appointmentService,
+        calendarConnectionService,
       },
       {
         organizationService,
@@ -153,6 +200,7 @@ export function createApp(deps: AppDependencies = {}): Express {
         internalServiceKey,
         organizationServiceCredentials,
         organizationPhoneNumbers,
+        appointmentService,
         twilioCallCredentialSecret,
       },
     ),

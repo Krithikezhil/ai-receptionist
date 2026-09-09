@@ -21,7 +21,14 @@ from urllib.parse import quote
 
 import httpx
 
-from voice_agent.clients.models import KnowledgeEntry, PhoneNumberLookup, RuntimeContext
+from voice_agent.clients.models import (
+    AvailabilityResult,
+    BookAppointmentResult,
+    BookedAppointmentSummary,
+    KnowledgeEntry,
+    PhoneNumberLookup,
+    RuntimeContext,
+)
 
 
 class ApiClientError(Exception):
@@ -158,6 +165,82 @@ class ApiClient:
 
         await self._post(f"/internal/v1/organizations/{organization_id}/leads", body)
 
+    async def check_availability(
+        self,
+        organization_id: str,
+        *,
+        service_id: str,
+        date: str,
+        time: str | None = None,
+    ) -> AvailabilityResult:
+        """GET /internal/v1/organizations/:id/appointments/availability
+        (M10 Step 7) -- see tools/check_availability.py for where service_id
+        actually comes from (never the LLM directly)."""
+        params: dict[str, str] = {"serviceId": service_id, "date": date}
+        if time:
+            params["time"] = time
+        data = await self._get(
+            f"/internal/v1/organizations/{organization_id}/appointments/availability",
+            params=params,
+        )
+        return AvailabilityResult.model_validate(data)
+
+    async def book_appointment(
+        self,
+        organization_id: str,
+        *,
+        service_id: str,
+        date: str,
+        time: str,
+        customer_name: str | None = None,
+        customer_phone: str | None = None,
+        customer_email: str | None = None,
+        notes: str | None = None,
+        call_sid: str | None = None,
+    ) -> BookAppointmentResult:
+        """POST /internal/v1/organizations/:id/appointments (M10 Step 7).
+        call_sid, when provided, is bound at pipeline-build time from the
+        real Twilio call -- see tools/book_appointment.py -- and is
+        independently re-verified server-side against req.verifiedCallSid
+        whenever call-credential authentication is active (see apps/api's
+        require-organization-auth.ts); this client never assumes it is
+        trusted on its own.
+
+        apps/api's success response is asymmetric: a booked appointment
+        returns {"appointment": {...}} with no top-level "status" field,
+        while every other outcome returns {"status": "...", ...}. That
+        asymmetry is normalized here so callers only ever see one
+        consistent BookAppointmentResult shape. 409 (unavailable /
+        duplicate_booking) is explicitly opted out of _post()'s default
+        raise-on-non-2xx behavior so the structured body (including
+        alternatives) is preserved rather than collapsed into a generic
+        ApiClientError -- every other non-2xx status still raises exactly
+        as before.
+        """
+        body: dict[str, str] = {"serviceId": service_id, "date": date, "time": time}
+        if customer_name:
+            body["customerName"] = customer_name
+        if customer_phone:
+            body["customerPhone"] = customer_phone
+        if customer_email:
+            body["customerEmail"] = customer_email
+        if notes:
+            body["notes"] = notes
+        if call_sid:
+            body["callSid"] = call_sid
+
+        data = await self._post(
+            f"/internal/v1/organizations/{organization_id}/appointments",
+            body,
+            ok_statuses=frozenset({409}),
+        )
+        if "appointment" in data:
+            return BookAppointmentResult(
+                status="booked",
+                appointment=BookedAppointmentSummary.model_validate(data["appointment"]),
+            )
+        return BookAppointmentResult.model_validate(data)
+
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
             response = await self._client.get(path, params=params)
@@ -181,7 +264,21 @@ class ApiClient:
         result: dict[str, Any] = response.json()
         return result
 
-    async def _post(self, path: str, json_body: dict[str, str]) -> dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        json_body: dict[str, str],
+        *,
+        ok_statuses: frozenset[int] = frozenset(),
+    ) -> dict[str, Any]:
+        """`ok_statuses` lets a specific caller (M10 Step 7's
+        book_appointment, which needs the structured body of a 409
+        unavailable/duplicate_booking response) opt a status code out of
+        the default raise-on-non-2xx behavior below. Defaults to empty, so
+        every existing caller (create_lead) is completely unaffected --
+        their status code is never in an empty set, so raise_for_status()
+        still runs exactly as before.
+        """
         try:
             response = await self._client.post(path, json=json_body)
         except httpx.RequestError as exc:
@@ -196,10 +293,13 @@ class ApiClient:
         if response.status_code == 404:
             raise ApiNotFoundError(f"Organization not found (requested {path}).")
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise ApiClientError(f"apps/api returned {response.status_code} for {path}.") from exc
+        if response.status_code not in ok_statuses:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise ApiClientError(
+                    f"apps/api returned {response.status_code} for {path}."
+                ) from exc
 
         result: dict[str, Any] = response.json()
         return result

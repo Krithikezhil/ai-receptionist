@@ -541,4 +541,139 @@ describe("internal voice API -- lead capture (M9 Step 6)", () => {
     expect(res.status).toBe(201);
     expect(res.body.lead.status).toBe("new");
   });
+
+  it("schedules exactly one lead_confirmation SMS notification when the lead has a contact phone number", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller", contactPhone: "+15551234567", intent: "Wants a quote" });
+
+    expect(res.status).toBe(201);
+
+    const scheduled = await ctx.smsNotifications.claimDue(10);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]).toMatchObject({
+      organizationId: orgAId,
+      notificationType: "lead_confirmation",
+      leadId: res.body.lead.id,
+      appointmentId: null,
+      destinationPhone: "+15551234567",
+    });
+  });
+
+  it("creates no SMS notification when the lead has no contact phone number", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/leads`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({ contactName: "Jane Caller", intent: "Wants a quote" });
+
+    expect(res.status).toBe(201);
+
+    const scheduled = await ctx.smsNotifications.claimDue(10);
+    expect(scheduled).toHaveLength(0);
+  });
+});
+
+describe("internal voice API -- appointment booking (M11 Step 3 SMS confirmation)", () => {
+  let ctx: Ctx;
+  let orgAId: string;
+  let orgAToken: string;
+  let serviceId: string;
+
+  const APPOINTMENT_DATE = "2030-01-07"; // a Monday
+  const APPOINTMENT_TIME = "10:00";
+
+  beforeEach(async () => {
+    ctx = buildTestApp();
+    const ownerA = await registerAgent(ctx, "owner-a@example.com");
+    const createdA = await createOrg(ownerA.agent, "Org A");
+    orgAId = createdA.organization.id;
+    orgAToken = createdA.serviceCredential.token;
+
+    const businessHoursEntries = Array.from({ length: 7 }, (_, dayOfWeek) => ({
+      dayOfWeek,
+      isOpen: dayOfWeek >= 1 && dayOfWeek <= 5,
+      openTime: dayOfWeek >= 1 && dayOfWeek <= 5 ? "09:00" : null,
+      closeTime: dayOfWeek >= 1 && dayOfWeek <= 5 ? "17:00" : null,
+    }));
+    const businessHoursRes = await ownerA.agent
+      .put(`/organizations/${orgAId}/business-hours`)
+      .send(businessHoursEntries);
+    expect(businessHoursRes.status).toBe(200);
+
+    const serviceRes = await ownerA.agent
+      .post(`/organizations/${orgAId}/services`)
+      .send({ name: "Consultation", durationMinutes: 60, price: 100 });
+    expect(serviceRes.status).toBe(201);
+    serviceId = serviceRes.body.service.id as string;
+
+    // Deterministic, no-network "connected" calendar -- see the narrow
+    // fakeCalendarConnectionService injection in build-test-app.ts. The
+    // existing googleCalendarClient fake already defaults to no busy
+    // periods and a successful createEvent, so no extra configuration is
+    // needed for that half.
+    ctx.fakeCalendarConnectionService.getAccessTokenResult = {
+      status: "ok",
+      accessToken: "fake-google-access-token",
+      expiresAt: new Date(Date.now() + 3600_000),
+    };
+  });
+
+  it("schedules exactly one appointment_confirmation SMS notification when the booking has a customer phone number", async () => {
+    const bookRes = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/appointments`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        serviceId,
+        date: APPOINTMENT_DATE,
+        time: APPOINTMENT_TIME,
+        customerName: "Jane Caller",
+        customerPhone: "+15551234567",
+      });
+
+    expect(bookRes.status).toBe(201);
+    expect(bookRes.body.appointment).toMatchObject({
+      organizationId: orgAId,
+      serviceId,
+      customerPhone: "+15551234567",
+      status: "scheduled",
+    });
+
+    const scheduled = await ctx.smsNotifications.claimDue(10);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]).toMatchObject({
+      organizationId: orgAId,
+      notificationType: "appointment_confirmation",
+      appointmentId: bookRes.body.appointment.id,
+      leadId: null,
+      destinationPhone: "+15551234567",
+    });
+  });
+
+  it("creates no SMS notification when the booking has no customer phone number", async () => {
+    const bookRes = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/appointments`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        serviceId,
+        date: APPOINTMENT_DATE,
+        time: APPOINTMENT_TIME,
+        customerName: "Jane Caller",
+      });
+
+    expect(bookRes.status).toBe(201);
+    expect(bookRes.body.appointment).toMatchObject({
+      organizationId: orgAId,
+      serviceId,
+      customerPhone: null,
+      status: "scheduled",
+    });
+
+    const scheduled = await ctx.smsNotifications.claimDue(10);
+    expect(scheduled).toHaveLength(0);
+  });
 });

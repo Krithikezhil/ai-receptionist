@@ -5,6 +5,7 @@ import { createAuthRouter } from "./auth.routes.js";
 import { healthRouter } from "./health.routes.js";
 import type { InternalRouterDeps } from "./internal.routes.js";
 import { createInternalRouter } from "./internal.routes.js";
+import { createOAuthRouter } from "./oauth.routes.js";
 
 export function createApiRouter(
   orgDeps: OrganizationRouterDeps,
@@ -14,6 +15,7 @@ export function createApiRouter(
   router.use("/health", healthRouter);
   router.use("/auth", createAuthRouter(orgDeps.authService));
   router.use("/organizations", createOrganizationsRouter(orgDeps));
+  router.use("/oauth", createOAuthRouter(orgDeps.calendarConnectionService));
   router.use("/internal/v1", createInternalRouter(internalDeps));
   return router;
 }

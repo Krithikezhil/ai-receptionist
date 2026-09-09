@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import { generateCallCredential } from "../auth/call-credential.js";
 import type { NewLead } from "../repositories/lead-types.js";
 import type { OrganizationPhoneNumberRepository } from "../repositories/organization-phone-number-types.js";
+import type { AppointmentService, BookAppointmentInput } from "../services/appointment.service.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
@@ -10,6 +11,10 @@ import { EmptyLeadError, type LeadService } from "../services/lead.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
 import type { ReceptionistConfigService } from "../services/receptionist-config.service.js";
 import type { ServicesCatalogService } from "../services/services-catalog.service.js";
+import {
+  createAppointmentSchema,
+  internalCheckAvailabilityQuerySchema,
+} from "../validation/appointment.schemas.js";
 import { createLeadSchema } from "../validation/lead.schemas.js";
 import { knowledgeListQuerySchema } from "../validation/knowledge.schemas.js";
 
@@ -22,6 +27,7 @@ export interface InternalControllerDeps {
   leadService: LeadService;
   receptionistConfigService: ReceptionistConfigService;
   organizationPhoneNumbers: OrganizationPhoneNumberRepository;
+  appointmentService: AppointmentService;
   twilioCallCredentialSecret: string;
 }
 
@@ -216,6 +222,150 @@ export function createInternalController(deps: InternalControllerDeps) {
         deps.twilioCallCredentialSecret,
       );
       res.status(200).json({ organizationId: match.organizationId, callCredential });
+    },
+
+    /**
+     * M10 Step 7: GET /internal/v1/organizations/:id/appointments/availability
+     * -- thin pass-through to AppointmentService.checkAvailability(), which
+     * already owns all business-hours/local-overlap/Google-FreeBusy logic.
+     * No new business logic lives here.
+     */
+    async checkAppointmentAvailability(req: Request, res: Response): Promise<void> {
+      const organizationId = req.params.organizationId as string;
+
+      const parsedQuery = internalCheckAvailabilityQuerySchema.safeParse(req.query);
+      if (!parsedQuery.success) {
+        res.status(400).json({ error: "Invalid query parameters." });
+        return;
+      }
+
+      const result = await deps.appointmentService.checkAvailability(
+        organizationId,
+        parsedQuery.data.serviceId,
+        parsedQuery.data.date,
+        parsedQuery.data.time,
+      );
+
+      switch (result.status) {
+        case "ok": {
+          const body: {
+            status: "ok";
+            slots: string[];
+            requestedTimeAvailable?: boolean;
+            alternatives?: string[];
+          } = { status: "ok", slots: result.slots };
+          if (result.requestedTimeAvailable !== undefined) {
+            body.requestedTimeAvailable = result.requestedTimeAvailable;
+          }
+          if (result.alternatives !== undefined) {
+            body.alternatives = result.alternatives;
+          }
+          res.status(200).json(body);
+          return;
+        }
+        // Not the caller's fault -- a legitimate operational state, not an
+        // error, matching the dashboard calendar-status endpoint's own
+        // "200 with a status field" precedent.
+        case "calendar_not_connected":
+        case "calendar_unavailable":
+          res.status(200).json({ status: result.status });
+          return;
+        case "service_not_found":
+          res.status(404).json({ error: "Service not found." });
+          return;
+        // Server misconfiguration (the organization's business-profile
+        // timezone is invalid) -- never the caller's fault.
+        case "invalid_timezone":
+          res.status(500).json({ error: "Organization is misconfigured." });
+          return;
+        case "invalid_date":
+          res.status(400).json({ error: "Invalid date." });
+          return;
+        case "invalid_time":
+          res.status(400).json({ error: "Invalid time." });
+          return;
+      }
+    },
+
+    /**
+     * M10 Step 7: POST /internal/v1/organizations/:id/appointments -- thin
+     * pass-through to AppointmentService.bookAppointment(), which already
+     * owns the full booking-write ordering, overlap/duplicate-booking
+     * checks, and Google Calendar compensation logic. No new business logic
+     * lives here.
+     *
+     * callSid binding: when this request was authenticated via a short-
+     * lived M7 call credential, req.verifiedCallSid (set by
+     * requireOrganizationAuth -- see middleware/require-organization-auth.ts)
+     * is authoritative. A body-supplied callSid is still accepted for
+     * symmetry with capture_lead, but it must match the verified value
+     * exactly or the request is rejected; when the body omits it, the
+     * verified value is used automatically. On the M5 long-lived
+     * per-organization-token path, req.verifiedCallSid is never set, so
+     * callSid (if any) continues to come from the body alone -- identical,
+     * unchanged behavior to createLead above.
+     */
+    async bookAppointment(req: Request, res: Response): Promise<void> {
+      const organizationId = req.params.organizationId as string;
+
+      const parsed = createAppointmentSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid appointment data." });
+        return;
+      }
+
+      let callSid = parsed.data.callSid ?? undefined;
+      if (req.verifiedCallSid !== undefined) {
+        if (callSid !== undefined && callSid !== req.verifiedCallSid) {
+          res.status(400).json({ error: "callSid does not match the authenticated call." });
+          return;
+        }
+        callSid = req.verifiedCallSid;
+      }
+
+      const input: BookAppointmentInput = {
+        serviceId: parsed.data.serviceId,
+        date: parsed.data.date,
+        time: parsed.data.time,
+      };
+      if (parsed.data.customerName !== undefined) input.customerName = parsed.data.customerName;
+      if (parsed.data.customerPhone !== undefined) input.customerPhone = parsed.data.customerPhone;
+      if (parsed.data.customerEmail !== undefined) input.customerEmail = parsed.data.customerEmail;
+      if (parsed.data.notes !== undefined) input.notes = parsed.data.notes;
+      if (callSid !== undefined) input.callSid = callSid;
+
+      const result = await deps.appointmentService.bookAppointment(organizationId, input);
+
+      switch (result.status) {
+        case "booked":
+          res.status(201).json({ appointment: result.appointment });
+          return;
+        case "service_not_found":
+          res.status(404).json({ error: "Service not found." });
+          return;
+        case "unavailable":
+          res.status(409).json({ status: "unavailable", alternatives: result.alternatives });
+          return;
+        case "duplicate_booking":
+          res.status(409).json({ status: "duplicate_booking" });
+          return;
+        case "calendar_not_connected":
+        case "calendar_unavailable":
+          res.status(200).json({ status: result.status });
+          return;
+        case "invalid_timezone":
+          res.status(500).json({ error: "Organization is misconfigured." });
+          return;
+        case "booking_failed":
+          res.status(500).json({ error: "Failed to complete the booking. Please try again." });
+          return;
+        case "invalid_time":
+        case "nonexistent_time":
+        case "ambiguous_time":
+        case "past_time":
+          res.status(400).json({ error: "Invalid or unavailable appointment time." });
+          return;
+      }
     },
   };
 }
