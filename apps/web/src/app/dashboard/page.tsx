@@ -1,4 +1,5 @@
 import { LogoutButton } from "../../components/logout-button";
+import { LeadsTable } from "../../components/leads/leads-table";
 import { KnowledgeManager } from "../../components/knowledge/knowledge-manager";
 import { BusinessHoursForm } from "../../components/organizations/business-hours-form";
 import { BusinessProfileForm } from "../../components/organizations/business-profile-form";
@@ -13,6 +14,7 @@ import {
   listServices,
 } from "../../lib/organizations";
 import { getDashboardContext } from "../../lib/dashboard-context";
+import { listLeads } from "../../lib/leads";
 
 export default async function DashboardPage() {
   const dashboardContext = await getDashboardContext();
@@ -36,13 +38,14 @@ export default async function DashboardPage() {
 
   const { user, organization } = dashboardContext;
 
-  const [businessProfile, businessHours, services, knowledge, receptionistConfig] =
+  const [businessProfile, businessHours, services, knowledge, receptionistConfig, leads] =
     await Promise.all([
       getBusinessProfile(organization.id),
       getBusinessHours(organization.id),
       listServices(organization.id),
       listKnowledge(organization.id),
       getReceptionistConfig(organization.id),
+      listLeads(organization.id),
     ]);
 
   return (
@@ -60,7 +63,7 @@ export default async function DashboardPage() {
 
         <p className="text-sm text-zinc-500 dark:text-zinc-500">
           This is the M4 business knowledge / AI receptionist configuration foundation. Calling, AI
-          conversations, leads, appointments, and billing are not implemented yet — see{" "}
+          conversations, appointments, and billing are not implemented yet — see{" "}
           <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
             TASKS.md
           </code>
@@ -74,6 +77,10 @@ export default async function DashboardPage() {
         <ReceptionistConfigForm
           organizationId={organization.id}
           initialConfig={receptionistConfig}
+        />
+        <LeadsTable
+          organizationId={organization.id}
+          initialLeads={leads}
         />
       </div>
     </div>
