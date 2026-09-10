@@ -1,5 +1,6 @@
 import { LogoutButton } from "../../components/logout-button";
 import { LeadsTable } from "../../components/leads/leads-table";
+import { AppointmentsTable } from "../../components/appointments/appointments-table";
 import { KnowledgeManager } from "../../components/knowledge/knowledge-manager";
 import { BusinessHoursForm } from "../../components/organizations/business-hours-form";
 import { BusinessProfileForm } from "../../components/organizations/business-profile-form";
@@ -15,6 +16,7 @@ import {
 } from "../../lib/organizations";
 import { getDashboardContext } from "../../lib/dashboard-context";
 import { listLeads } from "../../lib/leads";
+import { listAppointments } from "../../lib/appointments";
 
 export default async function DashboardPage() {
   const dashboardContext = await getDashboardContext();
@@ -38,7 +40,7 @@ export default async function DashboardPage() {
 
   const { user, organization } = dashboardContext;
 
-  const [businessProfile, businessHours, services, knowledge, receptionistConfig, leads] =
+  const [businessProfile, businessHours, services, knowledge, receptionistConfig, leads, appointments] =
     await Promise.all([
       getBusinessProfile(organization.id),
       getBusinessHours(organization.id),
@@ -46,6 +48,7 @@ export default async function DashboardPage() {
       listKnowledge(organization.id),
       getReceptionistConfig(organization.id),
       listLeads(organization.id),
+      listAppointments(organization.id),
     ]);
 
   return (
@@ -81,6 +84,10 @@ export default async function DashboardPage() {
         <LeadsTable
           organizationId={organization.id}
           initialLeads={leads}
+        />
+        <AppointmentsTable
+          organizationId={organization.id}
+          initialAppointments={appointments}
         />
       </div>
     </div>
