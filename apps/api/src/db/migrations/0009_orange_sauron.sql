@@ -1,0 +1,2 @@
+ALTER TABLE "sms_notifications" ADD COLUMN "provider_status" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "sms_notifications_provider_message_sid_idx" ON "sms_notifications" USING btree ("provider_message_sid");

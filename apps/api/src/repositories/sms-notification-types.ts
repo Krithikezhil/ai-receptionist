@@ -5,6 +5,26 @@ export type SmsNotificationType =
 
 export type SmsNotificationStatus = "pending" | "processing" | "sent" | "failed" | "skipped";
 
+/**
+ * Twilio's currently-documented Message resource status values, as a
+ * widened literal union: the known literals give autocomplete/
+ * exhaustiveness-checking value in a `switch`, but the `| (string & {})`
+ * member means an unanticipated future Twilio value (Twilio's own docs
+ * warn this set can evolve) still type-checks and round-trips correctly.
+ * Deliberately NOT enforced as a database-level enum (see db/schema.ts's
+ * providerStatus column) -- an enum-constrained column would force a new
+ * migration every time Twilio adds a status value, defeating the point of
+ * this being an open window into an external system we don't control.
+ */
+export type TwilioMessageStatus =
+  | "queued"
+  | "sending"
+  | "sent"
+  | "delivered"
+  | "undelivered"
+  | "failed"
+  | (string & {});
+
 export interface SmsNotification {
   id: string;
   organizationId: string;
@@ -14,6 +34,7 @@ export interface SmsNotification {
   destinationPhone: string;
   status: SmsNotificationStatus;
   providerMessageSid: string | null;
+  providerStatus: TwilioMessageStatus | null;
   attemptCount: number;
   claimedAt: Date | null;
   lastAttemptedAt: Date | null;
@@ -45,6 +66,7 @@ export type NewSmsNotification =
 export interface SmsNotificationStatusUpdate {
   status: SmsNotificationStatus;
   providerMessageSid?: string | null;
+  providerStatus?: TwilioMessageStatus | null;
   failureReason?: string | null;
   nextAttemptAt?: Date;
 }
@@ -87,6 +109,33 @@ export interface SmsNotificationRepository {
   ): Promise<SmsNotification | undefined>;
 
   /**
+   * Global lookup by Twilio's own message SID -- not scoped to an
+   * organization, mirroring
+   * OrganizationPhoneNumberRepository.findByPhoneNumber's exact
+   * precedent: this is what a future delivery-status webhook uses to
+   * resolve which row (and which organization) a callback belongs to,
+   * before any organization id is known.
+   */
+  findByProviderMessageSid(
+    providerMessageSid: string,
+  ): Promise<SmsNotification | undefined>;
+
+  /**
+   * Single-row lookup by (appointmentId, notificationType) -- exists
+   * specifically so AppointmentRepository.listDueForReminder's in-memory
+   * test double can reproduce the same "does a reminder already exist for
+   * this appointment" correlation the real Drizzle implementation
+   * expresses as a single NOT EXISTS subquery joined directly against this
+   * table (see drizzle/appointment.repository.ts). Not organization-scoped
+   * -- mirrors findByProviderMessageSid's precedent of a narrow, global,
+   * purpose-built lookup rather than a general-purpose query API.
+   */
+  findByAppointmentIdAndType(
+    appointmentId: string,
+    notificationType: SmsNotificationType,
+  ): Promise<SmsNotification | undefined>;
+
+  /**
    * May throw DuplicateSmsNotificationError or
    * SmsNotificationEntityReferenceError -- callers must catch these
    * specifically rather than treating them as a generic failure.
@@ -108,6 +157,26 @@ export interface SmsNotificationRepository {
    * UPDATE SKIP LOCKED).
    */
   claimDue(limit: number): Promise<SmsNotification[]>;
+
+  /**
+   * Reclaims rows stuck in "processing" whose claimedAt is older than
+   * olderThanMs, returning them to "pending" so a future claimDue() pass
+   * can retry them -- concurrency-safe the same way claimDue() is (see
+   * the Drizzle implementation). Does NOT touch attemptCount -- that was
+   * already incremented at the original claim time; a reclaimed row
+   * re-claimed later by claimDue() increments it again, so attemptCount
+   * naturally reflects every claim attempt, crashed or not.
+   * olderThanMs is caller-supplied (not a hardcoded constant) so tests
+   * can simulate staleness deterministically. This is at-least-once
+   * processing: a row reclaimed after the worker already successfully
+   * submitted it to the provider, but crashed before recording the
+   * result, WILL be resent on the next claim -- exactly-once delivery is
+   * not provided or claimed by this repository.
+   */
+  reclaimStaleProcessing(
+    olderThanMs: number,
+    limit: number,
+  ): Promise<SmsNotification[]>;
 
   /**
    * Transitions a claimed (or any existing) row to its next/final state.

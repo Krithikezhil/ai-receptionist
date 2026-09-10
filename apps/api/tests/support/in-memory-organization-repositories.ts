@@ -61,6 +61,7 @@ import {
   type SmsNotificationRepository,
   type SmsNotificationStatusUpdate,
 } from "../../src/repositories/sms-notification-types.js";
+import type { SmsOptOut, SmsOptOutRepository } from "../../src/repositories/sms-opt-out-types.js";
 import type { OrganizationCreationRepos, UnitOfWork } from "../../src/repositories/unit-of-work.js";
 
 /**
@@ -534,7 +535,9 @@ export function createInMemoryUnitOfWork(repos: OrganizationCreationRepos): Unit
   };
 }
 
-export function createInMemoryAppointmentRepository(): AppointmentRepository {
+export function createInMemoryAppointmentRepository(
+  smsNotifications: SmsNotificationRepository,
+): AppointmentRepository {
   const items = new Map<string, Appointment>();
 
   function overlapsActiveAppointment(
@@ -616,6 +619,22 @@ export function createInMemoryAppointmentRepository(): AppointmentRepository {
       items.delete(id);
       return true;
     },
+    async listDueForReminder(before) {
+      const now = new Date();
+      const results: Appointment[] = [];
+      for (const item of items.values()) {
+        if (!ACTIVE_APPOINTMENT_STATUSES.includes(item.status)) continue;
+        if (item.startTime > before) continue;
+        if (item.startTime <= now) continue;
+        const existingReminder = await smsNotifications.findByAppointmentIdAndType(
+          item.id,
+          "appointment_reminder",
+        );
+        if (existingReminder) continue;
+        results.push(item);
+      }
+      return results;
+    },
   };
 }
 
@@ -677,6 +696,17 @@ export function createInMemorySmsNotificationRepository(): SmsNotificationReposi
       const item = items.get(id);
       return item && item.organizationId === organizationId ? item : undefined;
     },
+    async findByProviderMessageSid(providerMessageSid) {
+      return [...items.values()].find(
+        (item) => item.providerMessageSid === providerMessageSid,
+      );
+    },
+    async findByAppointmentIdAndType(appointmentId, notificationType) {
+      return [...items.values()].find(
+        (item) =>
+          item.appointmentId === appointmentId && item.notificationType === notificationType,
+      );
+    },
     async create(notification: NewSmsNotification) {
       // Mirrors the real sms_notifications_exactly_one_entity CHECK
       // constraint and the two partial unique indexes (see db/schema.ts)
@@ -708,6 +738,7 @@ export function createInMemorySmsNotificationRepository(): SmsNotificationReposi
         destinationPhone: notification.destinationPhone,
         status: "pending",
         providerMessageSid: null,
+        providerStatus: null,
         attemptCount: 0,
         claimedAt: null,
         lastAttemptedAt: null,
@@ -751,12 +782,67 @@ export function createInMemorySmsNotificationRepository(): SmsNotificationReposi
       }
       return claimed;
     },
+    async reclaimStaleProcessing(olderThanMs, limit) {
+      const now = new Date();
+      const stale = [...items.values()]
+        .filter(
+          (item) =>
+            item.status === "processing" &&
+            item.claimedAt !== null &&
+            now.getTime() - item.claimedAt.getTime() >= olderThanMs,
+        )
+        .sort((a, b) => (a.claimedAt?.getTime() ?? 0) - (b.claimedAt?.getTime() ?? 0))
+        .slice(0, limit);
+
+      const reclaimed: SmsNotification[] = [];
+      for (const item of stale) {
+        const updated: SmsNotification = {
+          ...item,
+          status: "pending",
+          claimedAt: null,
+          updatedAt: now,
+        };
+        items.set(item.id, updated);
+        reclaimed.push(updated);
+      }
+      return reclaimed;
+    },
     async updateStatus(id, organizationId, update: SmsNotificationStatusUpdate) {
       const existing = items.get(id);
       if (!existing || existing.organizationId !== organizationId) return undefined;
       const updated = { ...existing, ...update, updatedAt: new Date() };
       items.set(id, updated);
       return updated;
+    },
+  };
+}
+
+export function createInMemorySmsOptOutRepository(): SmsOptOutRepository {
+  const items = new Map<string, SmsOptOut>();
+
+  function key(organizationId: string, phoneNumber: string): string {
+    return `${organizationId}\u0000${phoneNumber}`;
+  }
+
+  return {
+    async isOptedOut(organizationId, phoneNumber) {
+      return items.has(key(organizationId, phoneNumber));
+    },
+    async optOut(organizationId, phoneNumber) {
+      const k = key(organizationId, phoneNumber);
+      const existing = items.get(k);
+      if (existing) return existing;
+      const created: SmsOptOut = {
+        id: randomUUID(),
+        organizationId,
+        phoneNumber,
+        optedOutAt: new Date(),
+      };
+      items.set(k, created);
+      return created;
+    },
+    async optIn(organizationId, phoneNumber) {
+      items.delete(key(organizationId, phoneNumber));
     },
   };
 }

@@ -488,6 +488,7 @@ export const smsNotifications = pgTable(
       .notNull()
       .default("pending"),
     providerMessageSid: text("provider_message_sid"),
+    providerStatus: text("provider_status"),
     attemptCount: integer("attempt_count").notNull().default(0),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     lastAttemptedAt: timestamp("last_attempted_at", { withTimezone: true }),
@@ -505,6 +506,7 @@ export const smsNotifications = pgTable(
     uniqueIndex("sms_notifications_type_lead_id_idx")
       .on(t.notificationType, t.leadId)
       .where(sql`${t.leadId} IS NOT NULL`),
+    uniqueIndex("sms_notifications_provider_message_sid_idx").on(t.providerMessageSid),
     check(
       "sms_notifications_exactly_one_entity",
       sql`(${t.appointmentId} IS NOT NULL) <> (${t.leadId} IS NOT NULL)`,
@@ -514,3 +516,42 @@ export const smsNotifications = pgTable(
 
 export type SmsNotificationRow = typeof smsNotifications.$inferSelect;
 export type NewSmsNotificationRow = typeof smsNotifications.$inferInsert;
+
+/**
+ * M11 Step 4: tenant-scoped SMS opt-out state. Keyed by (organization_id,
+ * phone_number) -- NOT by phone_number alone, since the same customer
+ * phone number can appear across multiple organizations' leads/
+ * appointments, and opting out of one organization's texts must never
+ * silently opt them out of another's. Deliberately NOT a field on leads
+ * or appointments: neither table has a stable, canonical "this phone
+ * number, this organization" entity (a phone number can have many lead/
+ * appointment rows over time, and a customer can text STOP before ever
+ * becoming a lead or appointment) -- this table exists independently of
+ * any lead/appointment/notification record's lifecycle. The unique
+ * constraint below is both the tenant-isolation guarantee and the exact
+ * index the worker's pre-send lookup needs -- no separate index required.
+ * Row presence means opted-out; row absence means not opted out (no
+ * separate boolean/status column). Inbound STOP/START/HELP keyword
+ * parsing is deliberately out of scope for this table/step -- see
+ * repositories/sms-opt-out-types.ts.
+ */
+export const smsOptOuts = pgTable(
+  "sms_opt_outs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    phoneNumber: text("phone_number").notNull(), // E.164
+    optedOutAt: timestamp("opted_out_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("sms_opt_outs_organization_id_phone_number_idx").on(
+      t.organizationId,
+      t.phoneNumber,
+    ),
+  ],
+);
+
+export type SmsOptOutRow = typeof smsOptOuts.$inferSelect;
+export type NewSmsOptOutRow = typeof smsOptOuts.$inferInsert;

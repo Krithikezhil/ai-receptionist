@@ -14,6 +14,7 @@ import { createDrizzleReceptionistConfigRepository } from "./drizzle/receptionis
 import { createDrizzleServiceRepository } from "./drizzle/service.repository.js";
 import { createDrizzleSessionRepository } from "./drizzle/session.repository.js";
 import { createDrizzleSmsNotificationRepository } from "./drizzle/sms-notification.repository.js";
+import { createDrizzleSmsOptOutRepository } from "./drizzle/sms-opt-out.repository.js";
 import { createDrizzleUnitOfWork } from "./drizzle/unit-of-work.js";
 import { createDrizzleUserRepository } from "./drizzle/user.repository.js";
 import type { AppointmentRepository } from "./appointment-types.js";
@@ -32,6 +33,7 @@ import type {
 } from "./organization-types.js";
 import type { ReceptionistConfigRepository } from "./receptionist-config-types.js";
 import type { SmsNotificationRepository } from "./sms-notification-types.js";
+import type { SmsOptOutRepository } from "./sms-opt-out-types.js";
 import type { SessionRepository, UserRepository } from "./types.js";
 import type { UnitOfWork } from "./unit-of-work.js";
 
@@ -52,6 +54,7 @@ export interface Repositories {
   appointments: AppointmentRepository;
   organizationCalendarConnections: OrganizationCalendarConnectionRepository;
   smsNotifications: SmsNotificationRepository;
+  smsOptOuts: SmsOptOutRepository;
   unitOfWork: UnitOfWork;
 }
 
@@ -74,6 +77,7 @@ export function createRepositories(): Repositories {
     appointments: createDrizzleAppointmentRepository(db),
     organizationCalendarConnections: createDrizzleOrganizationCalendarConnectionRepository(db),
     smsNotifications: createDrizzleSmsNotificationRepository(db),
+    smsOptOuts: createDrizzleSmsOptOutRepository(db),
     unitOfWork: createDrizzleUnitOfWork(db),
   };
 }
@@ -95,4 +99,5 @@ export type { ReceptionistConfigRepository } from "./receptionist-config-types.j
 export type { AppointmentRepository } from "./appointment-types.js";
 export type { OrganizationCalendarConnectionRepository } from "./calendar-connection-types.js";
 export type { SmsNotificationRepository } from "./sms-notification-types.js";
+export type { SmsOptOutRepository } from "./sms-opt-out-types.js";
 export type { UnitOfWork } from "./unit-of-work.js";

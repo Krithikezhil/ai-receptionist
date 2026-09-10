@@ -8,18 +8,29 @@ import {
 import { logger } from "../config/logger.js";
 
 /**
- * M11 Step 3: schedules the two notification-creation-time SMS
- * notifications (appointment confirmations, lead confirmations) --
- * reminders are a later, separate step (worker-driven, not triggered from
- * here). Deliberately asynchronous-follow-up semantics: an already-
- * successful appointment booking or lead creation must never be made to
- * look like it failed because notification scheduling had a problem --
- * see the caller-side integration in appointment.service.ts /
+ * M11 Step 3/4B: schedules SMS notifications. Appointment/lead
+ * confirmations are triggered automatically at booking/lead-creation time
+ * -- see the caller-side integration in appointment.service.ts /
  * lead.service.ts, neither of which inspects this service's outcome
- * beyond awaiting it.
+ * beyond awaiting it. Appointment reminders are NOT triggered at creation
+ * time -- they are triggered later, once per due appointment, by the SMS
+ * worker's own polling loop (see workers/sms-worker.ts's
+ * materializeDueReminders), the only caller of
+ * scheduleAppointmentReminder. Deliberately asynchronous-follow-up
+ * semantics throughout: an already-successful appointment booking, lead
+ * creation, or reminder materialization must never be made to look like
+ * it failed because notification scheduling had a problem.
  */
 export interface SmsNotificationService {
   scheduleAppointmentConfirmation(appointment: Appointment): Promise<void>;
+  /**
+   * Called by the SMS worker's materializeDueReminders (see
+   * workers/sms-worker.ts) once per appointment it determines is due for
+   * a reminder -- never triggered at booking-creation time. Mirrors
+   * scheduleAppointmentConfirmation's exact signature and duplicate/error
+   * handling; the only difference is notificationType.
+   */
+  scheduleAppointmentReminder(appointment: Appointment): Promise<void>;
   scheduleLeadConfirmation(lead: Lead): Promise<void>;
 }
 
@@ -67,6 +78,18 @@ export function createSmsNotificationService(repo: SmsNotificationRepository): S
       await createIfPossible({
         organizationId: appointment.organizationId,
         notificationType: "appointment_confirmation",
+        destinationPhone,
+        appointmentId: appointment.id,
+      });
+    },
+
+    async scheduleAppointmentReminder(appointment) {
+      const destinationPhone = appointment.customerPhone;
+      if (!destinationPhone) return;
+
+      await createIfPossible({
+        organizationId: appointment.organizationId,
+        notificationType: "appointment_reminder",
         destinationPhone,
         appointmentId: appointment.id,
       });

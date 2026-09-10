@@ -1,8 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, inArray, lte, notExists, sql } from "drizzle-orm";
 import { DatabaseError } from "pg";
 import type { Database } from "../../db/client.js";
-import { appointments } from "../../db/schema.js";
+import { appointments, smsNotifications } from "../../db/schema.js";
 import {
+  ACTIVE_APPOINTMENT_STATUSES,
   AppointmentOverlapError,
   type Appointment,
   type AppointmentRepository,
@@ -94,6 +95,43 @@ export function createDrizzleAppointmentRepository(db: Database): AppointmentRep
         .where(and(eq(appointments.id, id), eq(appointments.organizationId, organizationId)))
         .returning({ id: appointments.id });
       return rows.length > 0;
+    },
+
+    /**
+     * NOT EXISTS is a read-time efficiency filter only -- it never
+     * substitutes for the real duplicate-prevention guarantee, which
+     * remains the sms_notifications_type_appointment_id_idx partial
+     * unique index (see db/schema.ts) enforced atomically at INSERT time
+     * via DuplicateSmsNotificationError. Two concurrent worker passes
+     * that both see NOT EXISTS = true for the same appointment in the
+     * same narrow window will still race safely: the second create() call
+     * hits that unique index and is absorbed as a no-op by the service
+     * layer (see sms-notification.service.ts's createIfPossible), exactly
+     * as it already is for every other duplicate-notification scenario.
+     */
+    async listDueForReminder(before) {
+      const rows = await db
+        .select()
+        .from(appointments)
+        .where(
+          and(
+            inArray(appointments.status, ACTIVE_APPOINTMENT_STATUSES),
+            lte(appointments.startTime, before),
+            gt(appointments.startTime, new Date()),
+            notExists(
+              db
+                .select({ one: sql`1` })
+                .from(smsNotifications)
+                .where(
+                  and(
+                    eq(smsNotifications.appointmentId, appointments.id),
+                    eq(smsNotifications.notificationType, "appointment_reminder"),
+                  ),
+                ),
+            ),
+          ),
+        );
+      return rows.map(toDomain);
     },
   };
 }

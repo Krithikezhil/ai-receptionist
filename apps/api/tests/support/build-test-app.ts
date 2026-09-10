@@ -30,6 +30,7 @@ import {
   createInMemoryReceptionistConfigRepository,
   createInMemoryServiceRepository,
   createInMemorySmsNotificationRepository,
+  createInMemorySmsOptOutRepository,
   createInMemoryUnitOfWork,
 } from "./in-memory-organization-repositories.js";
 import { createFakeGoogleCalendarClient } from "./fake-google-calendar-client.js";
@@ -88,9 +89,10 @@ export function buildTestApp() {
   const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
   const organizationPhoneNumbers = createInMemoryOrganizationPhoneNumberRepository();
   const leads = createInMemoryLeadRepository();
-  const appointments = createInMemoryAppointmentRepository();
-  const organizationCalendarConnections = createInMemoryOrganizationCalendarConnectionRepository();
   const smsNotifications = createInMemorySmsNotificationRepository();
+  const smsOptOuts = createInMemorySmsOptOutRepository();
+  const appointments = createInMemoryAppointmentRepository(smsNotifications);
+  const organizationCalendarConnections = createInMemoryOrganizationCalendarConnectionRepository();
   const googleCalendarClient = createFakeGoogleCalendarClient();
   const fakeCalendarConnectionService = createFakeCalendarConnectionService();
   const unitOfWork = createInMemoryUnitOfWork({
@@ -141,6 +143,8 @@ export function buildTestApp() {
     organizationServiceCredentials,
     organizationPhoneNumbers,
     twilioCallCredentialSecret: TEST_TWILIO_CALL_CREDENTIAL_SECRET,
+    smsNotifications,
+    smsOptOuts,
   };
 
   const app = createApp(deps);
@@ -165,5 +169,6 @@ export function buildTestApp() {
     receptionistConfigs,
     organizationServiceCredentials,
     organizationPhoneNumbers,
+    smsOptOuts,
   };
 }

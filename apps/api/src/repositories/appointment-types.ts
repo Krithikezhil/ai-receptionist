@@ -102,4 +102,19 @@ export interface AppointmentRepository {
    * just-inserted row when the subsequent Google Calendar write fails).
    */
   deleteByIdAndOrganizationId(id: string, organizationId: string): Promise<boolean>;
+  /**
+   * Appointments whose reminder SMS is due to be materialized: active
+   * (scheduled/confirmed -- see ACTIVE_APPOINTMENT_STATUSES), starting on
+   * or before `before`, and starting in the future relative to now.
+   * Deliberately NOT organization-scoped -- mirrors
+   * SmsNotificationRepository.claimDue's precedent of a single worker
+   * pass processing due work across every organization at once (see
+   * workers/sms-worker.ts). Excludes any appointment that already has an
+   * appointment_reminder sms_notifications row (any status) as a
+   * read-time efficiency filter only -- the actual duplicate-prevention
+   * guarantee remains the sms_notifications_type_appointment_id_idx
+   * partial unique index + DuplicateSmsNotificationError, unchanged; see
+   * the Drizzle implementation for exactly how this filter is expressed.
+   */
+  listDueForReminder(before: Date): Promise<Appointment[]>;
 }

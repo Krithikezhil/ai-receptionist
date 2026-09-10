@@ -77,6 +77,7 @@ export const logger = pino({
     "req.headers.authorization",
     "req.headers.cookie",
     'req.headers["x-organization-service-token"]',
+    'req.headers["x-twilio-signature"]',
     "res.headers.location",
   ],
 });

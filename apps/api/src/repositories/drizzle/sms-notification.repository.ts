@@ -1,4 +1,4 @@
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { DatabaseError } from "pg";
 import type { Database } from "../../db/client.js";
 import { smsNotifications } from "../../db/schema.js";
@@ -35,6 +35,7 @@ function toDomain(row: typeof smsNotifications.$inferSelect): SmsNotification {
     destinationPhone: row.destinationPhone,
     status: row.status,
     providerMessageSid: row.providerMessageSid,
+    providerStatus: row.providerStatus,
     attemptCount: row.attemptCount,
     claimedAt: row.claimedAt,
     lastAttemptedAt: row.lastAttemptedAt,
@@ -53,6 +54,29 @@ export function createDrizzleSmsNotificationRepository(db: Database): SmsNotific
         .from(smsNotifications)
         .where(
           and(eq(smsNotifications.id, id), eq(smsNotifications.organizationId, organizationId)),
+        )
+        .limit(1);
+      return row ? toDomain(row) : undefined;
+    },
+
+    async findByProviderMessageSid(providerMessageSid) {
+      const [row] = await db
+        .select()
+        .from(smsNotifications)
+        .where(eq(smsNotifications.providerMessageSid, providerMessageSid))
+        .limit(1);
+      return row ? toDomain(row) : undefined;
+    },
+
+    async findByAppointmentIdAndType(appointmentId, notificationType) {
+      const [row] = await db
+        .select()
+        .from(smsNotifications)
+        .where(
+          and(
+            eq(smsNotifications.appointmentId, appointmentId),
+            eq(smsNotifications.notificationType, notificationType),
+          ),
         )
         .limit(1);
       return row ? toDomain(row) : undefined;
@@ -142,6 +166,54 @@ export function createDrizzleSmsNotificationRepository(db: Database): SmsNotific
           .returning();
 
         return claimed.map(toDomain);
+      });
+    },
+
+    /**
+     * Reclaims rows stuck in "processing" whose claimedAt is older than
+     * olderThanMs -- same atomic SELECT ... FOR UPDATE SKIP LOCKED +
+     * UPDATE transaction pattern as claimDue() above, so two workers (or
+     * a worker and a separate reclaim pass) running this concurrently can
+     * never reclaim the same row twice. Does NOT touch attemptCount --
+     * that was already incremented when the row was originally claimed;
+     * a later claimDue() re-claiming this now-pending row increments it
+     * again, so attemptCount naturally reflects every claim attempt,
+     * crashed or not. olderThanMs is caller-supplied (not a hardcoded
+     * constant) so tests can simulate staleness deterministically.
+     */
+    async reclaimStaleProcessing(olderThanMs, limit) {
+      return db.transaction(async (tx) => {
+        const now = new Date();
+        const cutoff = new Date(now.getTime() - olderThanMs);
+
+        const staleRows = await tx
+          .select({ id: smsNotifications.id })
+          .from(smsNotifications)
+          .where(
+            and(
+              eq(smsNotifications.status, "processing"),
+              lt(smsNotifications.claimedAt, cutoff),
+            ),
+          )
+          .orderBy(smsNotifications.claimedAt)
+          .limit(limit)
+          .for("update", { skipLocked: true });
+
+        if (staleRows.length === 0) return [];
+
+        const ids = staleRows.map((row) => row.id);
+
+        const reclaimed = await tx
+          .update(smsNotifications)
+          .set({
+            status: "pending",
+            claimedAt: null,
+            updatedAt: now,
+          })
+          .where(inArray(smsNotifications.id, ids))
+          .returning();
+
+        return reclaimed.map(toDomain);
       });
     },
 

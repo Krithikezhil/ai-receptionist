@@ -9,8 +9,11 @@ import type { KnowledgeChunkRepository } from "./repositories/knowledge-chunk-ty
 import type { OrganizationPhoneNumberRepository } from "./repositories/organization-phone-number-types.js";
 import type { OrganizationServiceCredentialRepository } from "./repositories/organization-service-credential-types.js";
 import type { MembershipRepository } from "./repositories/organization-types.js";
+import type { SmsNotificationRepository } from "./repositories/sms-notification-types.js";
+import type { SmsOptOutRepository } from "./repositories/sms-opt-out-types.js";
 import { createRepositories } from "./repositories/index.js";
 import { createApiRouter } from "./routes/index.js";
+import { createTwilioSmsRouter } from "./routes/twilio-sms.routes.js";
 import { createAppointmentService, type AppointmentService } from "./services/appointment.service.js";
 import { createAuthService, type AuthService } from "./services/auth.service.js";
 import {
@@ -70,6 +73,13 @@ export interface AppDependencies {
   organizationPhoneNumbers?: OrganizationPhoneNumberRepository;
   /** Injected in tests with a fixed test value instead of a real env secret. */
   twilioCallCredentialSecret?: string;
+  /** Injected in tests to avoid needing a real Postgres connection --
+   * used only by the M11 Step 4B Twilio SMS status webhook. */
+  smsNotifications?: SmsNotificationRepository;
+  /** Injected in tests to avoid needing a real Postgres connection --
+   * used by the M11 Step 4 Twilio SMS inbound webhook (tenant-scoped
+   * opt-out state). */
+  smsOptOuts?: SmsOptOutRepository;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
@@ -126,6 +136,16 @@ export function createApp(deps: AppDependencies = {}): Express {
     deps.organizationServiceCredentials ?? repos.organizationServiceCredentials;
   const organizationPhoneNumbers =
     deps.organizationPhoneNumbers ?? repos.organizationPhoneNumbers;
+  // M11 Step 4B: the Twilio SMS status webhook needs the raw repository
+  // directly (not a service) -- overridable here the same way
+  // organizationServiceCredentials/organizationPhoneNumbers already are,
+  // so tests never silently fall through to the real Postgres-backed
+  // repos.smsNotifications.
+  const smsNotifications = deps.smsNotifications ?? repos.smsNotifications;
+  // M11 Step 4: the Twilio SMS inbound webhook needs the raw opt-out
+  // repository directly -- same overridable-for-tests pattern as
+  // smsNotifications immediately above.
+  const smsOptOuts = deps.smsOptOuts ?? repos.smsOptOuts;
   // Same random-per-boot-if-unset treatment as internalServiceKey above,
   // and for the same reason: Twilio's own routes should fail closed (no
   // credential minted before this boot could ever verify) rather than the
@@ -205,6 +225,14 @@ export function createApp(deps: AppDependencies = {}): Express {
       },
     ),
   );
+
+  // M11 Step 4B: mounted directly here (not composed through
+  // routes/index.ts's createApiRouter, unlike every other router) --
+  // functionally equivalent; public, gated exclusively by
+  // X-Twilio-Signature verification inside the controller itself, never
+  // by requireAuth/requireOrgMembership/requireServiceAuth (Twilio cannot
+  // present any of those). See routes/twilio-sms.routes.ts.
+  app.use("/twilio", createTwilioSmsRouter(smsNotifications, organizationPhoneNumbers, smsOptOuts));
 
   // Centralized error handler: never leak stack traces or internal error
   // details to clients. Express 5 forwards rejected async handler promises
