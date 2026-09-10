@@ -1,4 +1,3 @@
-import { redirect } from "next/navigation";
 import { LogoutButton } from "../../components/logout-button";
 import { KnowledgeManager } from "../../components/knowledge/knowledge-manager";
 import { BusinessHoursForm } from "../../components/organizations/business-hours-form";
@@ -11,29 +10,19 @@ import {
   getBusinessProfile,
   getReceptionistConfig,
   listKnowledge,
-  listOrganizations,
   listServices,
 } from "../../lib/organizations";
-import { getCurrentUser } from "../../lib/session";
+import { getDashboardContext } from "../../lib/dashboard-context";
 
 export default async function DashboardPage() {
-  const user = await getCurrentUser();
+  const dashboardContext = await getDashboardContext();
 
-  // The redirect here is a UX convenience, not the security boundary — the
-  // API independently rejects unauthenticated requests to every protected
-  // endpoint regardless of what this page does. See SECURITY.md.
-  if (!user) {
-    redirect("/login");
-  }
-
-  const organizations = await listOrganizations();
-
-  if (organizations.length === 0) {
+  if (dashboardContext.status === "no-organization") {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-6 bg-zinc-50 px-6 dark:bg-black">
         <div className="flex w-full max-w-sm flex-col items-start gap-2">
           <h1 className="text-2xl font-semibold text-black dark:text-zinc-50">
-            Welcome, {user.email}
+            Welcome, {dashboardContext.user.email}
           </h1>
           <p className="text-sm text-zinc-500 dark:text-zinc-500">
             You don&apos;t belong to an organization yet.
@@ -45,12 +34,7 @@ export default async function DashboardPage() {
     );
   }
 
-  // M3 does not build a multi-organization switcher UI — the backend fully
-  // supports a user belonging to multiple organizations (see
-  // ARCHITECTURE.md "Current organization"), but the dashboard shows the
-  // first one. Every request below is still independently authorized
-  // server-side regardless of this frontend simplification.
-  const organization = organizations[0]!;
+  const { user, organization } = dashboardContext;
 
   const [businessProfile, businessHours, services, knowledge, receptionistConfig] =
     await Promise.all([
