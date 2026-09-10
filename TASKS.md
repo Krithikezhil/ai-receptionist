@@ -1135,7 +1135,7 @@ complete.
       PostgreSQL instance, a real Google OAuth consent screen, and real Google Calendar API calls
       (availability, booking, and cancellation) have all been exercised successfully.
 
-## M11 -- SMS confirmations and reminders (in progress)
+## Completed -- M11 SMS confirmations and reminders
 
 **Step 1: Data model (`sms_notifications`)**
 - [x] `sms_notifications` table -- nullable `appointment_id`/`lead_id` FKs (`ON DELETE cascade`),
@@ -1185,10 +1185,212 @@ complete.
       regression. **Final verification: full `apps/api` suite -- 20/20 test files, 313/313 tests
       passed, no regressions.**
 
-**Outstanding**
-- [ ] Step 4 (SMS-sending worker, Twilio client, `claimDue()`-driven send loop, delivery-status
-      webhook, STOP/opt-out handling, reminder scheduling) -- not yet started.
+**Step 4: SMS-sending worker, Twilio client, delivery-status webhook, opt-out handling, reminder scheduling**
+- [x] Implemented as the single bundled step originally scoped -- no Step 4A/4B/4C/4D split:
+      `workers/sms-worker.ts` (the `claimDue()`-driven poll/claim/retry/backoff loop, stale-processing
+      reclaim, and reminder materialization), `services/twilio-sms-client.ts` (real Twilio REST
+      client, no SDK), `controllers/twilio-sms-status.controller.ts` (delivery-status webhook) and
+      `twilio-sms-inbound.controller.ts` (STOP/START/HELP keyword handling backed by a new
+      tenant-scoped `sms_opt_outs` table, migration `0010_opposite_proemial_gods.sql`),
+      `auth/twilio-webhook-signature.ts` (shared Twilio signature verification, reused by both
+      webhooks), and the standalone `worker.ts` process entrypoint (`npm run worker`).
+- [x] Full read-only pre-commit audit -- security (signature verification, tenant isolation,
+      opt-out enforcement, phone normalization, logging/privacy), functionality (retries/backoff,
+      reminders, delivery status, Twilio client), database (migrations `0009`/`0010` vs.
+      schema/journal consistency), and scope (all 42 changed files confirmed as M11 Step 4 or
+      direct supporting infrastructure) -- returned a **READY TO COMMIT** verdict with zero
+      blocking findings.
+- [x] Verified: `npm run test -w apps/api` -- 473/473 tests, 30/30 files passing; `npm run lint -w
+      apps/api` clean; `npm run typecheck -w apps/api` showing only the same pre-existing,
+      unrelated errors already catalogued in earlier milestones (`http-request-serializer.test.ts`,
+      `oauth-flow.test.ts`, `oauth-state.test.ts`, and one `exactOptionalPropertyTypes`
+      fixture-typing note in `sms-worker.test.ts`) -- no new errors introduced.
+- [x] Committed as `a336e55` (`feat(api): implement M11 SMS worker and opt-out handling`, full SHA
+      `a336e557b7f6a420ce1c98723f083c76c84b0d49`) and pushed to `origin/main`.
+- [ ] **Real end-to-end verification not yet performed in this environment.** Mirrors M9 Step 11's
+      and M10's own real-infrastructure verification gate: migrations `0009`/`0010` have been
+      generated and reviewed but not applied to a live PostgreSQL database here, and no real Twilio
+      account/phone number has been used to send/receive an actual SMS or exercise a real STOP/
+      START/HELP round-trip or delivery-status callback. Automated coverage (473/473 tests against
+      in-memory repositories and a fake Twilio client) remains complete and passing, but does not
+      substitute for this.
+
+## M12 -- Dashboard (planned, not started)
+
+**Planning artifact only -- no implementation has started.** This section establishes the
+authoritative M12 step breakdown per the official scope in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): "Customer-facing dashboard in `apps/web`: call
+transcripts, call summaries, leads, appointments, business analytics, usage tracking." Derived by
+reading the existing `apps/web` structure (`src/app/dashboard/page.tsx`, `src/lib/session.ts`,
+`src/lib/organizations.ts`, `src/components/*`), the existing `apps/api` routes/repositories
+leads/appointments already expose, and the existing security/tenant-isolation model -- so this plan
+reuses what already exists rather than duplicating it, and explicitly flags what genuinely does not
+exist yet instead of inventing it.
+
+**Confirmed starting state (read-only findings this planning pass depends on):**
+- `apps/web` currently has exactly one dashboard page (`src/app/dashboard/page.tsx`, a server
+  component) rendering business-profile/business-hours/services/knowledge/receptionist-config forms
+  for the user's first organization only (no multi-organization switcher; every request is still
+  independently re-authorized server-side regardless of this frontend simplification -- see
+  ARCHITECTURE.md "Current organization"). No shared layout/nav component exists beyond the root
+  `layout.tsx`. No client-side data-fetching library is used (`fetch` directly, local `useState`,
+  no SWR/React Query). **`apps/web` has no test framework configured at all** (`package.json` has
+  no `test` script and no testing dependency) -- M8-M11's Vitest convention exists only in
+  `apps/api`/`services/voice-agent`.
+- `GET/PATCH/DELETE /organizations/:id/leads` and `GET/PATCH /organizations/:id/appointments`
+  already exist (`organizations.routes.ts`), explicitly built dashboard-only ahead of this
+  milestone (see the M9 Step 5 / M10 Step 5 comments in that file) -- M12's Leads and Appointments
+  views consume these directly; no new backend endpoints are required for either.
+- **No call/transcript/session data model exists anywhere in this codebase.** `db/schema.ts`'s
+  `leads.callSid`/`appointments.callSid` are explicitly documented as "informational only, not a
+  foreign key -- no calls/sessions table exists." M6/M7 explicitly deferred call recording/
+  transcription storage as out of scope. This means "call transcripts, call summaries" has no
+  existing data source -- Steps 5-6 below must design this from scratch, and the depth of that
+  design (metadata only vs. full transcript text) is flagged as a genuinely open, unresolved
+  product/security decision, not decided by this plan.
+- No business-analytics or usage-tracking endpoint exists anywhere in `apps/api`.
+
+**Step 1: Dashboard foundation -- layout, navigation, routing**
+- [ ] Introduce a shared dashboard layout (`src/app/dashboard/layout.tsx`) providing a persistent
+      nav/header (organization name, logged-in user, `LogoutButton`) shared across every dashboard
+      subpage, replacing the ad hoc per-page header currently duplicated in `page.tsx`.
+- [ ] Split the current single `dashboard/page.tsx` into a routed section structure, e.g.
+      `dashboard/page.tsx` (overview), `dashboard/leads/page.tsx`, `dashboard/appointments/page.tsx`,
+      `dashboard/calls/page.tsx`, `dashboard/analytics/page.tsx`, `dashboard/settings/page.tsx`
+      (housing the existing business-profile/hours/services/knowledge/receptionist-config forms,
+      moved as-is, not rewritten). Exact route names/grouping to be finalized at implementation
+      time; the principle (one focused page per resource, existing forms relocated not rebuilt) is
+      the binding part of this step.
+- [ ] Nav links reflect only what is actually implemented at any given point (no dead links to
+      not-yet-built sections).
+
+**Step 2: Authenticated organization/business context**
+- [ ] Extract the existing `getCurrentUser()` + `listOrganizations()` + redirect-if-unauthenticated
+      + redirect/empty-state-if-no-organization logic (currently inline in `dashboard/page.tsx`)
+      into one reusable server-side helper consumed by every dashboard subpage from Step 1, instead
+      of being copy-pasted per page. No new authorization mechanism -- reuses `getCurrentUser`
+      (`lib/session.ts`) and `listOrganizations` (`lib/organizations.ts`) unmodified; the frontend
+      redirect remains a UX convenience only, never the security boundary (per SECURITY.md --
+      every API call below is still independently re-authorized server-side).
+- [ ] Preserve the existing, explicitly-documented "first organization only" simplification unless
+      a multi-organization switcher is explicitly scoped as its own sub-step here -- not assumed.
+
+**Step 3: Leads dashboard view**
+- [ ] Add `Lead`/`LeadStatus` types and `listLeads`/`updateLeadStatus`/`deleteLead` helpers to
+      `lib/organizations.ts` (or a new `lib/leads.ts`, mirroring the existing module-per-resource
+      precedent), calling the already-existing `GET/PATCH/DELETE /organizations/:id/leads[/:id]`
+      endpoints -- no backend change.
+- [ ] `components/leads/leads-table.tsx` (client component, mirroring `knowledge-manager.tsx`'s
+      established pattern): list, status filter, status-update action, delete action, using the
+      same `fetch(..., { credentials: "include" })` + optimistic local-state-update convention
+      already established.
+- [ ] Loading/empty ("no leads yet")/error states (see Step 9).
+
+**Step 4: Appointments dashboard view**
+- [ ] Add `Appointment`/`AppointmentStatus` types and `listAppointments`/`updateAppointmentStatus`
+      helpers, calling the already-existing `GET/PATCH /organizations/:id/appointments[/:id]`
+      endpoints -- no backend change (booking/creation remains voice-agent-only, unchanged from
+      M10; this view is read + cancellation-status-update only, matching the existing API surface).
+- [ ] `components/appointments/appointments-table.tsx`: list (upcoming/past grouping computed
+      client-side from `startTime`, no new backend filter needed), cancellation action, empty/
+      loading/error states.
+
+**Step 5: Calls/conversations data model and capture (backend)**
+- [ ] **Open design decision, not resolved by this plan:** define a new, minimal `calls` (or
+      `call_sessions`) table -- organization-scoped, `call_sid` (from the real M7 Twilio webhook
+      data already flowing through `services/voice-agent/src/voice_agent/routes/twilio.py`),
+      `started_at`/`ended_at`, and an outcome/disposition field. Whether this step also stores full
+      verbatim transcript text is an explicit open question: doing so is a materially different,
+      more privacy-sensitive capability than the metadata-only scope M6/M7 deliberately excluded,
+      and would need its own SECURITY.md review (retention, access control, redaction) before
+      being built -- this plan does not decide that question and scopes Step 5 to call metadata
+      (+ optional short summary, Step 6) only, pending that separate decision.
+- [ ] `services/voice-agent` needs a new write path to record call start/end against this table --
+      a new `ApiClient` method + internal-API endpoint, mirroring the established `create_lead`
+      (M9 Step 7) / `book_appointment` (M10 Step 7) pattern: service-auth + organization-bound,
+      never trusting an LLM-tool-supplied organization id.
+- [ ] Dashboard-facing `GET /organizations/:id/calls` (list) endpoint, same `requireAuth` +
+      `requireOrgMembership` pattern as every other resource in `organizations.routes.ts`.
+
+**Step 6: Call summaries**
+- [ ] Depends on Step 5's data model and its open transcript-storage decision. Scoped here as an
+      optional short, free-text summary field on the Step 5 table, populated by the voice agent at
+      call end (e.g., from the LLM's own end-of-call context) rather than a separate
+      summarization pipeline -- avoids inventing new infrastructure beyond what Step 5 already
+      requires. If Step 5 resolves to metadata-only (no transcript), this field is the entire
+      "call summary" feature; if Step 5 later adds transcript storage, this field remains
+      independent of it.
+
+**Step 7: Calls dashboard view (frontend)**
+- [ ] Blocked by Steps 5-6. `lib/calls.ts` (`listCalls`) + `components/calls/calls-table.tsx`:
+      list of calls per organization with metadata + summary (if present), empty/loading/error
+      states. No transcript rendering unless Step 5's open question resolves to storing one.
+
+**Step 8: Business analytics**
+- [ ] **Assumption requiring confirmation:** initial scope is simple, derived aggregate counts
+      over a period (e.g., appointments by status, leads by status, calls handled once Step 5
+      exists, SMS sent via the existing `sms_notifications` table) -- not a general-purpose BI/
+      reporting system. New `GET /organizations/:id/analytics` endpoint (or several narrower ones),
+      same auth pattern as every other resource, computing aggregates from existing tables rather
+      than a new denormalized analytics store.
+- [ ] Frontend: `components/analytics/analytics-summary.tsx` -- summary cards/simple charts.
+      No charting library is currently a dependency of `apps/web`; whether to add one (and which)
+      is left to implementation time rather than decided here, to avoid adding a dependency this
+      plan can't justify against real requirements yet.
+
+**Step 9: Usage tracking**
+- [ ] **Assumption requiring confirmation:** IMPLEMENTATION_PLAN.md lists "usage tracking" under
+      M12 (Dashboard) and "metered usage billing" separately under M13 (Stripe billing). This plan
+      treats M12's usage tracking as a lightweight, read-only display of already-derivable
+      per-organization counts (calls handled, SMS sent, appointments booked) over a period --
+      explicitly NOT the metered/billable usage-metering system, which remains M13's scope. If
+      that boundary is wrong, it should be corrected before Step 9 is implemented, not assumed
+      silently.
+- [ ] If Step 9's counts are a strict subset of Step 8's analytics aggregates, consider folding
+      Step 9 into Step 8's endpoint/view rather than building a second, near-duplicate one --
+      a decision for implementation time once both steps' exact shape is clearer.
+
+**Step 10: Loading/empty/error states (cross-cutting)**
+- [ ] Formalize one shared convention (e.g., shared skeleton/empty-state/error-banner components
+      under `components/`) applied consistently across Steps 3-4 and 7-9's views, rather than each
+      view inventing its own ad hoc handling -- matches this project's general preference for one
+      shared pattern over N independently-drifting ones.
+
+**Step 11: Tenant isolation and authorization review**
+- [ ] Dedicated audit step, mirroring the tenant-isolation review every prior milestone with new
+      backend endpoints has performed: confirm every new endpoint from Steps 5/8/9 uses the exact
+      same `requireAuth` + `requireOrgMembership` (+ owner-only gate where warranted, matching the
+      `phone-numbers`/`calendar` precedent) pattern as every existing resource; confirm no new
+      endpoint accepts a bare resource id without an `organizationId` scope in the query itself
+      (matching `LeadRepository`/`AppointmentRepository`'s existing "deliberately unrepresentable
+      at the type level" precedent); confirm the frontend never treats client-side state as an
+      authorization boundary.
+
+**Step 12: Tests**
+- [ ] `apps/api`: new tests for any Step 5/8/9 backend endpoints, following the existing Vitest +
+      in-memory-repository + supertest convention used throughout `apps/api/tests/`.
+- [ ] `apps/web`: **currently has no test framework at all** -- this step must first introduce one.
+      Recommendation (not a decision made by this plan): Vitest + React Testing Library, for
+      consistency with `apps/api`'s existing Vitest choice, added as a new `apps/web` devDependency
+      at implementation time (out of scope for this documentation-only planning pass). Component
+      tests for Steps 3-4, 7-9's views (rendering, loading/empty/error states, action handlers)
+      and the Step 2 context helper.
+
+**Step 13: Accessibility and responsive behavior**
+- [ ] Pass over every new view from Steps 1, 3-4, 7-9: semantic HTML, keyboard navigability,
+      ARIA labeling for tables/forms/actions, responsive layout at common breakpoints -- using the
+      existing Tailwind styling approach already established by the M3/M4 forms, not a new UI
+      framework.
+
+**Step 14: Final verification**
+- [ ] Full regression: `apps/web` typecheck/lint/build clean; `apps/api` typecheck/lint/test clean
+      (including any Step 5/8/9 additions); `services/voice-agent` regression if Step 5 touches it
+      (ruff/mypy/pytest). Manual verification checklist: the dashboard renders real data end-to-end
+      against a live backend, and (if Step 5 is implemented) a real Twilio-originated call actually
+      produces a visible calls-dashboard entry. Documentation pass: `TASKS.md` completion status,
+      `ARCHITECTURE.md`/`SECURITY.md` updates for any new endpoints or (if resolved) the transcript-
+      storage decision from Step 5.
 
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M8 through M15.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M13 through M15.
