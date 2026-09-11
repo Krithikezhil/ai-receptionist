@@ -11,6 +11,7 @@ import type {
   OrganizationCalendarConnection,
   OrganizationCalendarConnectionRepository,
 } from "../../src/repositories/calendar-connection-types.js";
+import type { Call, CallRepository, NewCall } from "../../src/repositories/call-types.js";
 import type {
   KnowledgeChunk,
   KnowledgeChunkRepository,
@@ -843,6 +844,22 @@ export function createInMemorySmsOptOutRepository(): SmsOptOutRepository {
     },
     async optIn(organizationId, phoneNumber) {
       items.delete(key(organizationId, phoneNumber));
+    },
+  };
+}
+
+export function createInMemoryCallRepository(): CallRepository {
+  const items = new Map<string, Call>();
+
+  return {
+    async listByOrganizationId(organizationId) {
+      return [...items.values()].filter((c) => c.organizationId === organizationId);
+    },
+    async create(newCall: NewCall) {
+      const now = new Date();
+      const call: Call = { id: randomUUID(), ...newCall, createdAt: now, updatedAt: now };
+      items.set(call.id, call);
+      return call;
     },
   };
 }

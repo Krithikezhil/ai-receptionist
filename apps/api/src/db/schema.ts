@@ -555,3 +555,37 @@ export const smsOptOuts = pgTable(
 
 export type SmsOptOutRow = typeof smsOptOuts.$inferSelect;
 export type NewSmsOptOutRow = typeof smsOptOuts.$inferInsert;
+
+/**
+ * M12 Step 5: minimal, organization-scoped call/session metadata only --
+ * no transcript, recording, or conversation content. callSid is the real
+ * Twilio CallSid from M7 (routes/twilio.py), never invented. Uniqueness
+ * is organization-scoped, not global -- callSid must not become a
+ * cross-tenant lookup mechanism. disposition describes how the session
+ * itself ended, not a business outcome. One row is written once, at call
+ * end (see session.py) -- no separate start/update path in this step.
+ */
+export const calls = pgTable(
+  "calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    callSid: text("call_sid").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }).notNull(),
+    disposition: text("disposition", {
+      enum: ["completed", "failed", "abandoned"],
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("calls_organization_id_idx").on(t.organizationId),
+    uniqueIndex("calls_organization_id_call_sid_idx").on(t.organizationId, t.callSid),
+  ],
+);
+
+export type CallRow = typeof calls.$inferSelect;
+export type NewCallRow = typeof calls.$inferInsert;

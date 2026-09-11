@@ -1,6 +1,11 @@
 import request from "supertest";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildTestApp, TEST_INTERNAL_SERVICE_KEY } from "./support/build-test-app.js";
+import { generateCallCredential } from "../src/auth/call-credential.js";
+import {
+  buildTestApp,
+  TEST_INTERNAL_SERVICE_KEY,
+  TEST_TWILIO_CALL_CREDENTIAL_SECRET,
+} from "./support/build-test-app.js";
 import { createOrg, registerAgent, type TestAppContext } from "./support/http-helpers.js";
 
 type Ctx = TestAppContext;
@@ -675,5 +680,252 @@ describe("internal voice API -- appointment booking (M11 Step 3 SMS confirmation
 
     const scheduled = await ctx.smsNotifications.claimDue(10);
     expect(scheduled).toHaveLength(0);
+  });
+});
+
+describe("internal voice API -- call recording (M12 Step 5)", () => {
+  let ctx: Ctx;
+  let orgAId: string;
+  let orgAToken: string;
+  let orgBId: string;
+  let orgBToken: string;
+
+  beforeEach(async () => {
+    ctx = buildTestApp();
+    const ownerA = await registerAgent(ctx, "owner-a@example.com");
+    const createdA = await createOrg(ownerA.agent, "Org A");
+    orgAId = createdA.organization.id;
+    orgAToken = createdA.serviceCredential.token;
+
+    const ownerB = await registerAgent(ctx, "owner-b@example.com");
+    const createdB = await createOrg(ownerB.agent, "Org B");
+    orgBId = createdB.organization.id;
+    orgBToken = createdB.serviceCredential.token;
+  });
+
+  it("records a call with a valid service credential and organization token (M5 token path)", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        callSid: "CA-test-call-1",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.call).toMatchObject({
+      organizationId: orgAId,
+      callSid: "CA-test-call-1",
+      disposition: "completed",
+    });
+    expect(res.body.call.startedAt).toBe("2026-01-01T10:00:00.000Z");
+    expect(res.body.call.endedAt).toBe("2026-01-01T10:05:00.000Z");
+  });
+
+  it("rejects invalid call data", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        callSid: "CA-bad-datetime",
+        startedAt: "not-a-date",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "Invalid call data." });
+
+    const stored = await ctx.calls.listByOrganizationId(orgAId);
+    expect(stored).toHaveLength(0);
+  });
+
+  it("rejects call recording with no Authorization header", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        callSid: "CA-no-auth",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(401);
+  });
+
+  // Matches requireOrganizationServiceToken existing, unmodified behavior
+  // for a missing or invalid per-organization token -- see this same file
+  // "denies access when the organization token header is missing entirely"
+  // and lead-capture "rejects lead creation when the organization token is
+  // missing" precedents, both 403. 401 is reserved for a missing or invalid
+  // GLOBAL service key (requireServiceAuth) only.
+  it("rejects call recording when the organization token is missing", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .send({
+        callSid: "CA-no-org-token",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(403);
+
+    const stored = await ctx.calls.listByOrganizationId(orgAId);
+    expect(stored).toHaveLength(0);
+  });
+
+  it("rejects using the org A token to record a call for org B", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgBId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        callSid: "CA-cross-org",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(403);
+
+    const leaked = await ctx.calls.listByOrganizationId(orgBId);
+    expect(leaked).toHaveLength(0);
+  });
+
+  it("ignores a spoofed organizationId in the request body -- the route/token-verified id always wins", async () => {
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        callSid: "CA-spoofed-org",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+        organizationId: orgBId,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.call.organizationId).toBe(orgAId);
+
+    const leakedIntoB = await ctx.calls.listByOrganizationId(orgBId);
+    expect(leakedIntoB).toHaveLength(0);
+  });
+
+  it("records a call authenticated via a valid M7 call credential whose verified callSid matches the body", async () => {
+    const credential = generateCallCredential(
+      orgAId,
+      "CA-test-call-2",
+      TEST_TWILIO_CALL_CREDENTIAL_SECRET,
+    );
+
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, credential)
+      .send({
+        callSid: "CA-test-call-2",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.call.callSid).toBe("CA-test-call-2");
+
+    const stored = await ctx.calls.listByOrganizationId(orgAId);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.callSid).toBe("CA-test-call-2");
+  });
+
+  it("rejects a call credential whose verified callSid does not match the body callSid", async () => {
+    const credential = generateCallCredential(
+      orgAId,
+      "CA-test-call-3",
+      TEST_TWILIO_CALL_CREDENTIAL_SECRET,
+    );
+
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, credential)
+      .send({
+        callSid: "CA-different-call",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "callSid does not match the authenticated call." });
+
+    const stored = await ctx.calls.listByOrganizationId(orgAId);
+    expect(stored).toHaveLength(0);
+  });
+
+  it("rejects a call credential request with no body callSid at all (recordCallSchema requires it)", async () => {
+    const credential = generateCallCredential(
+      orgAId,
+      "CA-test-call-4",
+      TEST_TWILIO_CALL_CREDENTIAL_SECRET,
+    );
+
+    const res = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, credential)
+      .send({
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "Invalid call data." });
+
+    const stored = await ctx.calls.listByOrganizationId(orgAId);
+    expect(stored).toHaveLength(0);
+  });
+
+  it("allows the same callSid to be recorded under two different organizations (organization-scoped, not global, uniqueness)", async () => {
+    const resA = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgAId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgAToken)
+      .send({
+        callSid: "CA-shared-sid",
+        startedAt: "2026-01-01T10:00:00.000Z",
+        endedAt: "2026-01-01T10:05:00.000Z",
+        disposition: "completed",
+      });
+    expect(resA.status).toBe(201);
+    expect(resA.body.call.organizationId).toBe(orgAId);
+
+    const resB = await request(ctx.app)
+      .post(`/internal/v1/organizations/${orgBId}/calls`)
+      .set("Authorization", AUTH_HEADER)
+      .set(ORG_TOKEN_HEADER, orgBToken)
+      .send({
+        callSid: "CA-shared-sid",
+        startedAt: "2026-01-01T11:00:00.000Z",
+        endedAt: "2026-01-01T11:05:00.000Z",
+        disposition: "failed",
+      });
+    expect(resB.status).toBe(201);
+    expect(resB.body.call.organizationId).toBe(orgBId);
+
+    const storedA = await ctx.calls.listByOrganizationId(orgAId);
+    const storedB = await ctx.calls.listByOrganizationId(orgBId);
+    expect(storedA).toHaveLength(1);
+    expect(storedB).toHaveLength(1);
+    expect(storedA[0]?.callSid).toBe("CA-shared-sid");
+    expect(storedB[0]?.callSid).toBe("CA-shared-sid");
   });
 });

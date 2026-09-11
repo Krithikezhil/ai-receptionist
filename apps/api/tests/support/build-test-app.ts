@@ -4,6 +4,7 @@ import { createAuthService } from "../../src/services/auth.service.js";
 import { createBusinessHoursService } from "../../src/services/business-hours.service.js";
 import { createBusinessProfileService } from "../../src/services/business-profile.service.js";
 import { createCalendarConnectionService } from "../../src/services/calendar-connection.service.js";
+import { createCallService } from "../../src/services/call.service.js";
 import { createEmbeddingProvider } from "../../src/services/embedding-provider.js";
 import { createKnowledgeService } from "../../src/services/knowledge.service.js";
 import { createLeadService } from "../../src/services/lead.service.js";
@@ -20,6 +21,7 @@ import {
   createInMemoryAppointmentRepository,
   createInMemoryBusinessHoursRepository,
   createInMemoryBusinessProfileRepository,
+  createInMemoryCallRepository,
   createInMemoryKnowledgeChunkRepository,
   createInMemoryKnowledgeRepository,
   createInMemoryLeadRepository,
@@ -91,6 +93,7 @@ export function buildTestApp() {
   const leads = createInMemoryLeadRepository();
   const smsNotifications = createInMemorySmsNotificationRepository();
   const smsOptOuts = createInMemorySmsOptOutRepository();
+  const calls = createInMemoryCallRepository();
   const appointments = createInMemoryAppointmentRepository(smsNotifications);
   const organizationCalendarConnections = createInMemoryOrganizationCalendarConnectionRepository();
   const googleCalendarClient = createFakeGoogleCalendarClient();
@@ -123,6 +126,7 @@ export function buildTestApp() {
     googleCalendarClient,
     smsNotificationService,
   );
+  const callService = createCallService(calls);
 
   const deps: Required<AppDependencies> = {
     authService,
@@ -138,6 +142,7 @@ export function buildTestApp() {
     receptionistConfigService,
     phoneNumberService,
     appointmentService,
+    callService,
     calendarConnectionService,
     internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
     organizationServiceCredentials,
@@ -161,6 +166,7 @@ export function buildTestApp() {
     knowledge,
     knowledgeChunks,
     leads,
+    calls,
     appointments,
     organizationCalendarConnections,
     smsNotifications,

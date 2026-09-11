@@ -6,6 +6,7 @@ import type { OrganizationPhoneNumberRepository } from "../repositories/organiza
 import type { AppointmentService, BookAppointmentInput } from "../services/appointment.service.js";
 import type { BusinessHoursService } from "../services/business-hours.service.js";
 import type { BusinessProfileService } from "../services/business-profile.service.js";
+import type { CallService } from "../services/call.service.js";
 import type { KnowledgeService } from "../services/knowledge.service.js";
 import { EmptyLeadError, type LeadService } from "../services/lead.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
@@ -15,6 +16,7 @@ import {
   createAppointmentSchema,
   internalCheckAvailabilityQuerySchema,
 } from "../validation/appointment.schemas.js";
+import { recordCallSchema } from "../validation/call.schemas.js";
 import { createLeadSchema } from "../validation/lead.schemas.js";
 import { knowledgeListQuerySchema } from "../validation/knowledge.schemas.js";
 
@@ -28,6 +30,7 @@ export interface InternalControllerDeps {
   receptionistConfigService: ReceptionistConfigService;
   organizationPhoneNumbers: OrganizationPhoneNumberRepository;
   appointmentService: AppointmentService;
+  callService: CallService;
   twilioCallCredentialSecret: string;
 }
 
@@ -366,6 +369,48 @@ export function createInternalController(deps: InternalControllerDeps) {
           res.status(400).json({ error: "Invalid or unavailable appointment time." });
           return;
       }
+    },
+
+    /**
+     * M12 Step 5: POST /internal/v1/organizations/:id/calls -- the sole
+     * write path for call metadata, written once at call end (see
+     * services/voice-agent's session.py). No transcript, recording, or
+     * conversation content is ever accepted here -- see call.schemas.ts's
+     * own comment on recordCallSchema and db/schema.ts's comment on the
+     * calls table.
+     *
+     * callSid binding: identical discipline to bookAppointment above, but
+     * callSid is REQUIRED here (recordCallSchema has no optional callSid),
+     * so the verified-credential comparison always runs whenever
+     * req.verifiedCallSid is set -- there is no "body omitted it" case to
+     * special-case.
+     */
+    async recordCall(req: Request, res: Response): Promise<void> {
+      const organizationId = req.params.organizationId as string;
+
+      const parsed = recordCallSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid call data." });
+        return;
+      }
+
+      let callSid = parsed.data.callSid;
+      if (req.verifiedCallSid !== undefined && callSid !== req.verifiedCallSid) {
+        res.status(400).json({ error: "callSid does not match the authenticated call." });
+        return;
+      }
+      if (req.verifiedCallSid !== undefined) {
+        callSid = req.verifiedCallSid;
+      }
+
+      const call = await deps.callService.recordCall(organizationId, {
+        callSid,
+        startedAt: new Date(parsed.data.startedAt),
+        endedAt: new Date(parsed.data.endedAt),
+        disposition: parsed.data.disposition,
+      });
+
+      res.status(201).json({ call });
     },
   };
 }

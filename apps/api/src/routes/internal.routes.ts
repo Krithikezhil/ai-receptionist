@@ -75,6 +75,13 @@ export function createInternalRouter(deps: InternalRouterDeps): Router {
     organizationAuth,
     controller.bookAppointment,
   );
+  // M12 Step 5: same two-stage auth chain as every route above.
+  router.post(
+    "/organizations/:organizationId/calls",
+    serviceAuth,
+    organizationAuth,
+    controller.recordCall,
+  );
 
   return router;
 }

@@ -28,6 +28,7 @@ import {
   createCalendarConnectionService,
   type CalendarConnectionService,
 } from "./services/calendar-connection.service.js";
+import { createCallService, type CallService } from "./services/call.service.js";
 import { createEmbeddingProvider, type EmbeddingProvider } from "./services/embedding-provider.js";
 import { createGoogleCalendarClient } from "./services/google-calendar-client.js";
 import { createKnowledgeService, type KnowledgeService } from "./services/knowledge.service.js";
@@ -67,6 +68,7 @@ export interface AppDependencies {
   phoneNumberService?: PhoneNumberService;
   calendarConnectionService?: CalendarConnectionService;
   appointmentService?: AppointmentService;
+  callService?: CallService;
   /** Injected in tests with a fixed test value instead of a real env secret. */
   internalServiceKey?: string;
   organizationServiceCredentials?: OrganizationServiceCredentialRepository;
@@ -178,6 +180,10 @@ export function createApp(deps: AppDependencies = {}): Express {
       createGoogleCalendarClient(),
       smsNotificationService,
     );
+  // M12 Step 5: constructed directly from the repository bundle -- no
+  // other service composed in, unlike appointmentService/leadService
+  // above (no SMS/calendar side effect exists for a call record).
+  const callService = deps.callService ?? createCallService(repos.calls);
 
   const app = express();
 
@@ -221,6 +227,7 @@ export function createApp(deps: AppDependencies = {}): Express {
         organizationServiceCredentials,
         organizationPhoneNumbers,
         appointmentService,
+        callService,
         twilioCallCredentialSecret,
       },
     ),
