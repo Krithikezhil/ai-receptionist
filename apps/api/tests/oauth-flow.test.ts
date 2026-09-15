@@ -256,7 +256,9 @@ describe("GET /oauth/google/callback (OAuth callback)", () => {
     const fetchSpy = stubFetchMustNotBeCalled();
     const connectRes = await ownerAgent.post(`/organizations/${orgId}/calendar`);
     const validState = extractStateFromRedirect(connectRes.headers.location as string);
-    const [payloadB64, sigB64] = validState.split(".");
+    const stateParts = validState.split(".");
+    expect(stateParts).toHaveLength(2);
+    const [payloadB64, sigB64] = stateParts as [string, string];
     const decoded = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as Record<
       string,
       unknown
@@ -359,7 +361,9 @@ describe("GET /oauth/google/callback (OAuth callback)", () => {
     const fetchSpy = stubFetchMustNotBeCalled();
     const connectRes = await ownerAgent.post(`/organizations/${orgId}/calendar`);
     const validState = extractStateFromRedirect(connectRes.headers.location as string);
-    const [payloadB64, sigB64] = validState.split(".");
+    const stateParts = validState.split(".");
+    expect(stateParts).toHaveLength(2);
+    const [payloadB64, sigB64] = stateParts as [string, string];
     const decoded = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as Record<
       string,
       unknown

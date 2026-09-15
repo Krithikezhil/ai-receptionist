@@ -18,7 +18,7 @@ type SerializedHttpRequest = Parameters<typeof httpRequestSerializer>[0];
  */
 function makeSerializedRequest(overrides: Partial<SerializedHttpRequest> = {}): SerializedHttpRequest {
   return {
-    id: 1,
+    id: "1",
     method: "GET",
     url: "/health",
     query: {},
@@ -97,7 +97,7 @@ describe("httpRequestSerializer", () => {
 
   it("preserves every other field unchanged for a non-OAuth URL (proves no re-serialization)", () => {
     const input = makeSerializedRequest({
-      id: 42,
+      id: "42",
       method: "POST",
       url: "/organizations/org-1/knowledge",
       query: {},
@@ -117,7 +117,7 @@ describe("httpRequestSerializer", () => {
 
   it("preserves method, headers, remoteAddress, remotePort, id, and params when the URL is under /oauth/", () => {
     const input = makeSerializedRequest({
-      id: 7,
+      id: "7",
       method: "GET",
       url: "/oauth/google/callback?code=abc&state=xyz",
       query: { code: "abc", state: "xyz" },

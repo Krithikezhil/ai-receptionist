@@ -61,7 +61,9 @@ describe("oauth-state", () => {
 
   it("rejects a state tampered with after signing (organizationId swapped)", () => {
     const state = generateOAuthState(ORG_A, USER_A);
-    const [payloadB64, sigB64] = state.split(".");
+    const stateParts = state.split(".");
+    expect(stateParts).toHaveLength(2);
+    const [payloadB64, sigB64] = stateParts as [string, string];
     const decoded = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as Record<
       string,
       unknown

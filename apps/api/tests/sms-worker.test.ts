@@ -104,7 +104,7 @@ async function seedAppointment(
     customerPhone: "+15559990000",
     startTime: overrides.startTime,
     endTime: new Date(overrides.startTime.getTime() + 30 * 60 * 1000),
-    status: overrides.status,
+    ...(overrides.status !== undefined ? { status: overrides.status } : {}),
   });
 }
 
