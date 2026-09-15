@@ -1296,7 +1296,7 @@ exist yet instead of inventing it.
       loading/error states.
 
 **Step 5: Calls/conversations data model and capture (backend)**
-- [ ] **Open design decision, not resolved by this plan:** define a new, minimal `calls` (or
+- [x] **Open design decision, not resolved by this plan:** define a new, minimal `calls` (or
       `call_sessions`) table -- organization-scoped, `call_sid` (from the real M7 Twilio webhook
       data already flowing through `services/voice-agent/src/voice_agent/routes/twilio.py`),
       `started_at`/`ended_at`, and an outcome/disposition field. Whether this step also stores full
@@ -1305,15 +1305,15 @@ exist yet instead of inventing it.
       and would need its own SECURITY.md review (retention, access control, redaction) before
       being built -- this plan does not decide that question and scopes Step 5 to call metadata
       (+ optional short summary, Step 6) only, pending that separate decision.
-- [ ] `services/voice-agent` needs a new write path to record call start/end against this table --
+- [x] `services/voice-agent` needs a new write path to record call start/end against this table --
       a new `ApiClient` method + internal-API endpoint, mirroring the established `create_lead`
       (M9 Step 7) / `book_appointment` (M10 Step 7) pattern: service-auth + organization-bound,
       never trusting an LLM-tool-supplied organization id.
-- [ ] Dashboard-facing `GET /organizations/:id/calls` (list) endpoint, same `requireAuth` +
+- [x] Dashboard-facing `GET /organizations/:id/calls` (list) endpoint, same `requireAuth` +
       `requireOrgMembership` pattern as every other resource in `organizations.routes.ts`.
 
 **Step 6: Call summaries**
-- [ ] Depends on Step 5's data model and its open transcript-storage decision. Scoped here as an
+- [x] Depends on Step 5's data model and its open transcript-storage decision. Scoped here as an
       optional short, free-text summary field on the Step 5 table, populated by the voice agent at
       call end (e.g., from the LLM's own end-of-call context) rather than a separate
       summarization pipeline -- avoids inventing new infrastructure beyond what Step 5 already
@@ -1322,42 +1322,42 @@ exist yet instead of inventing it.
       independent of it.
 
 **Step 7: Calls dashboard view (frontend)**
-- [ ] Blocked by Steps 5-6. `lib/calls.ts` (`listCalls`) + `components/calls/calls-table.tsx`:
+- [x] Blocked by Steps 5-6. `lib/calls.ts` (`listCalls`) + `components/calls/calls-table.tsx`:
       list of calls per organization with metadata + summary (if present), empty/loading/error
       states. No transcript rendering unless Step 5's open question resolves to storing one.
 
 **Step 8: Business analytics**
-- [ ] **Assumption requiring confirmation:** initial scope is simple, derived aggregate counts
+- [x] **Assumption requiring confirmation:** initial scope is simple, derived aggregate counts
       over a period (e.g., appointments by status, leads by status, calls handled once Step 5
       exists, SMS sent via the existing `sms_notifications` table) -- not a general-purpose BI/
       reporting system. New `GET /organizations/:id/analytics` endpoint (or several narrower ones),
       same auth pattern as every other resource, computing aggregates from existing tables rather
       than a new denormalized analytics store.
-- [ ] Frontend: `components/analytics/analytics-summary.tsx` -- summary cards/simple charts.
+- [x] Frontend: `components/analytics/analytics-summary.tsx` -- summary cards/simple charts.
       No charting library is currently a dependency of `apps/web`; whether to add one (and which)
       is left to implementation time rather than decided here, to avoid adding a dependency this
       plan can't justify against real requirements yet.
 
 **Step 9: Usage tracking**
-- [ ] **Assumption requiring confirmation:** IMPLEMENTATION_PLAN.md lists "usage tracking" under
+- [x] **Assumption requiring confirmation:** IMPLEMENTATION_PLAN.md lists "usage tracking" under
       M12 (Dashboard) and "metered usage billing" separately under M13 (Stripe billing). This plan
       treats M12's usage tracking as a lightweight, read-only display of already-derivable
       per-organization counts (calls handled, SMS sent, appointments booked) over a period --
       explicitly NOT the metered/billable usage-metering system, which remains M13's scope. If
       that boundary is wrong, it should be corrected before Step 9 is implemented, not assumed
       silently.
-- [ ] If Step 9's counts are a strict subset of Step 8's analytics aggregates, consider folding
+- [x] If Step 9's counts are a strict subset of Step 8's analytics aggregates, consider folding
       Step 9 into Step 8's endpoint/view rather than building a second, near-duplicate one --
       a decision for implementation time once both steps' exact shape is clearer.
 
 **Step 10: Loading/empty/error states (cross-cutting)**
-- [ ] Formalize one shared convention (e.g., shared skeleton/empty-state/error-banner components
+- [x] Formalize one shared convention (e.g., shared skeleton/empty-state/error-banner components
       under `components/`) applied consistently across Steps 3-4 and 7-9's views, rather than each
       view inventing its own ad hoc handling -- matches this project's general preference for one
       shared pattern over N independently-drifting ones.
 
 **Step 11: Tenant isolation and authorization review**
-- [ ] Dedicated audit step, mirroring the tenant-isolation review every prior milestone with new
+- [x] Dedicated audit step, mirroring the tenant-isolation review every prior milestone with new
       backend endpoints has performed: confirm every new endpoint from Steps 5/8/9 uses the exact
       same `requireAuth` + `requireOrgMembership` (+ owner-only gate where warranted, matching the
       `phone-numbers`/`calendar` precedent) pattern as every existing resource; confirm no new
@@ -1367,9 +1367,9 @@ exist yet instead of inventing it.
       authorization boundary.
 
 **Step 12: Tests**
-- [ ] `apps/api`: new tests for any Step 5/8/9 backend endpoints, following the existing Vitest +
+- [x] `apps/api`: new tests for any Step 5/8/9 backend endpoints, following the existing Vitest +
       in-memory-repository + supertest convention used throughout `apps/api/tests/`.
-- [ ] `apps/web`: **currently has no test framework at all** -- this step must first introduce one.
+- [x] `apps/web`: **currently has no test framework at all** -- this step must first introduce one.
       Recommendation (not a decision made by this plan): Vitest + React Testing Library, for
       consistency with `apps/api`'s existing Vitest choice, added as a new `apps/web` devDependency
       at implementation time (out of scope for this documentation-only planning pass). Component
