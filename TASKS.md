@@ -1251,47 +1251,47 @@ exist yet instead of inventing it.
 - No business-analytics or usage-tracking endpoint exists anywhere in `apps/api`.
 
 **Step 1: Dashboard foundation -- layout, navigation, routing**
-- [ ] Introduce a shared dashboard layout (`src/app/dashboard/layout.tsx`) providing a persistent
+- [x] Introduce a shared dashboard layout (`src/app/dashboard/layout.tsx`) providing a persistent
       nav/header (organization name, logged-in user, `LogoutButton`) shared across every dashboard
       subpage, replacing the ad hoc per-page header currently duplicated in `page.tsx`.
-- [ ] Split the current single `dashboard/page.tsx` into a routed section structure, e.g.
+- [x] Split the current single `dashboard/page.tsx` into a routed section structure, e.g.
       `dashboard/page.tsx` (overview), `dashboard/leads/page.tsx`, `dashboard/appointments/page.tsx`,
       `dashboard/calls/page.tsx`, `dashboard/analytics/page.tsx`, `dashboard/settings/page.tsx`
       (housing the existing business-profile/hours/services/knowledge/receptionist-config forms,
       moved as-is, not rewritten). Exact route names/grouping to be finalized at implementation
       time; the principle (one focused page per resource, existing forms relocated not rebuilt) is
       the binding part of this step.
-- [ ] Nav links reflect only what is actually implemented at any given point (no dead links to
+- [x] Nav links reflect only what is actually implemented at any given point (no dead links to
       not-yet-built sections).
 
 **Step 2: Authenticated organization/business context**
-- [ ] Extract the existing `getCurrentUser()` + `listOrganizations()` + redirect-if-unauthenticated
+- [x] Extract the existing `getCurrentUser()` + `listOrganizations()` + redirect-if-unauthenticated
       + redirect/empty-state-if-no-organization logic (currently inline in `dashboard/page.tsx`)
       into one reusable server-side helper consumed by every dashboard subpage from Step 1, instead
       of being copy-pasted per page. No new authorization mechanism -- reuses `getCurrentUser`
       (`lib/session.ts`) and `listOrganizations` (`lib/organizations.ts`) unmodified; the frontend
       redirect remains a UX convenience only, never the security boundary (per SECURITY.md --
       every API call below is still independently re-authorized server-side).
-- [ ] Preserve the existing, explicitly-documented "first organization only" simplification unless
+- [x] Preserve the existing, explicitly-documented "first organization only" simplification unless
       a multi-organization switcher is explicitly scoped as its own sub-step here -- not assumed.
 
 **Step 3: Leads dashboard view**
-- [ ] Add `Lead`/`LeadStatus` types and `listLeads`/`updateLeadStatus`/`deleteLead` helpers to
+- [x] Add `Lead`/`LeadStatus` types and `listLeads`/`updateLeadStatus`/`deleteLead` helpers to
       `lib/organizations.ts` (or a new `lib/leads.ts`, mirroring the existing module-per-resource
       precedent), calling the already-existing `GET/PATCH/DELETE /organizations/:id/leads[/:id]`
       endpoints -- no backend change.
-- [ ] `components/leads/leads-table.tsx` (client component, mirroring `knowledge-manager.tsx`'s
+- [x] `components/leads/leads-table.tsx` (client component, mirroring `knowledge-manager.tsx`'s
       established pattern): list, status filter, status-update action, delete action, using the
       same `fetch(..., { credentials: "include" })` + optimistic local-state-update convention
       already established.
-- [ ] Loading/empty ("no leads yet")/error states (see Step 9).
+- [x] Loading/empty ("no leads yet")/error states (see Step 9).
 
 **Step 4: Appointments dashboard view**
-- [ ] Add `Appointment`/`AppointmentStatus` types and `listAppointments`/`updateAppointmentStatus`
+- [x] Add `Appointment`/`AppointmentStatus` types and `listAppointments`/`updateAppointmentStatus`
       helpers, calling the already-existing `GET/PATCH /organizations/:id/appointments[/:id]`
       endpoints -- no backend change (booking/creation remains voice-agent-only, unchanged from
       M10; this view is read + cancellation-status-update only, matching the existing API surface).
-- [ ] `components/appointments/appointments-table.tsx`: list (upcoming/past grouping computed
+- [x] `components/appointments/appointments-table.tsx`: list (upcoming/past grouping computed
       client-side from `startTime`, no new backend filter needed), cancellation action, empty/
       loading/error states.
 
@@ -1377,7 +1377,7 @@ exist yet instead of inventing it.
       and the Step 2 context helper.
 
 **Step 13: Accessibility and responsive behavior**
-- [ ] Pass over every new view from Steps 1, 3-4, 7-9: semantic HTML, keyboard navigability,
+- [x] Pass over every new view from Steps 1, 3-4, 7-9: semantic HTML, keyboard navigability,
       ARIA labeling for tables/forms/actions, responsive layout at common breakpoints -- using the
       existing Tailwind styling approach already established by the M3/M4 forms, not a new UI
       framework.
