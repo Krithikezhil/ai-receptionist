@@ -589,3 +589,45 @@ export const calls = pgTable(
 
 export type CallRow = typeof calls.$inferSelect;
 export type NewCallRow = typeof calls.$inferInsert;
+
+/**
+ * M13 Step 1: at most one local subscription-state row per organization
+ * (organizationId itself is the primary key -- same "one row per org, no
+ * synthetic id" shape as organizationServiceCredentials/
+ * organizationCalendarConnections, since this table holds provider-linked
+ * state too). Row creation is deliberately lazy: an organization with no
+ * row here simply has no local subscription state yet -- there is no
+ * "none"/"inactive" sentinel value, and no row is created at organization-
+ * creation time. stripeCustomerId/stripeSubscriptionId are nullable
+ * (populated once Stripe-side objects exist) and each unique, so two
+ * organizations can never map to the same Stripe customer or subscription;
+ * Postgres treats multiple NULLs as distinct under a plain UNIQUE
+ * constraint, so this needs no partial/filtered index. plan is deliberately
+ * plain nullable text, not an enum: no application-level plan catalog is
+ * defined yet (a later M13 step), and inventing plan names here would be
+ * inventing product scope this migration has no basis for. status uses
+ * this schema's existing TypeScript-enum-text pattern (see leads.status,
+ * appointments.status, organizationCalendarConnections.status) -- a
+ * deliberately small, locally-meaningful set rather than a mirror of every
+ * Stripe subscription status, matching organizationCalendarConnections'
+ * own precedent of narrowing a larger external vocabulary. Repository/
+ * service/webhook code is deliberately NOT part of this step -- see the
+ * approved M13 plan for later steps.
+ */
+export const organizationSubscriptions = pgTable("organization_subscriptions", {
+  organizationId: uuid("organization_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  stripeCustomerId: text("stripe_customer_id").unique(),
+  stripeSubscriptionId: text("stripe_subscription_id").unique(),
+  plan: text("plan"),
+  status: text("status", {
+    enum: ["active", "past_due", "canceled", "incomplete"],
+  }),
+  currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type OrganizationSubscriptionRow = typeof organizationSubscriptions.$inferSelect;
+export type NewOrganizationSubscriptionRow = typeof organizationSubscriptions.$inferInsert;
