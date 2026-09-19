@@ -30,6 +30,11 @@ import type {
   OrganizationSubscriptionUpdate,
 } from "../../src/repositories/organization-subscription-types.js";
 import type {
+  NewStripeWebhookEvent,
+  StripeWebhookEvent,
+  StripeWebhookEventRepository,
+} from "../../src/repositories/stripe-webhook-event-types.js";
+import type {
   BusinessHoursEntry,
   BusinessHoursRepository,
   BusinessProfile,
@@ -564,6 +569,14 @@ export function createInMemoryAppointmentRepository(
     async listByOrganizationId(organizationId) {
       return [...items.values()].filter((a) => a.organizationId === organizationId);
     },
+    async listByOrganizationIdBetween(organizationId, since, until) {
+      return [...items.values()].filter(
+        (a) =>
+          a.organizationId === organizationId &&
+          a.createdAt.getTime() >= since.getTime() &&
+          a.createdAt.getTime() <= until.getTime(),
+      );
+    },
     async findByIdAndOrganizationId(id, organizationId) {
       const item = items.get(id);
       return item && item.organizationId === organizationId ? item : undefined;
@@ -699,6 +712,17 @@ export function createInMemorySmsNotificationRepository(): SmsNotificationReposi
   }
 
   return {
+    async listByOrganizationId(organizationId) {
+      return [...items.values()].filter((item) => item.organizationId === organizationId);
+    },
+    async listByOrganizationIdBetween(organizationId, since, until) {
+      return [...items.values()].filter(
+        (item) =>
+          item.organizationId === organizationId &&
+          item.createdAt.getTime() >= since.getTime() &&
+          item.createdAt.getTime() <= until.getTime(),
+      );
+    },
     async findByIdAndOrganizationId(id, organizationId) {
       const item = items.get(id);
       return item && item.organizationId === organizationId ? item : undefined;
@@ -856,15 +880,42 @@ export function createInMemorySmsOptOutRepository(): SmsOptOutRepository {
 
 export function createInMemoryCallRepository(): CallRepository {
   const items = new Map<string, Call>();
+  const key = (organizationId: string, callSid: string) => `${organizationId}:${callSid}`;
 
   return {
     async listByOrganizationId(organizationId) {
       return [...items.values()].filter((c) => c.organizationId === organizationId);
     },
+    async listByOrganizationIdBetween(organizationId, since, until) {
+      return [...items.values()].filter(
+        (c) =>
+          c.organizationId === organizationId &&
+          c.startedAt.getTime() >= since.getTime() &&
+          c.startedAt.getTime() <= until.getTime(),
+      );
+    },
     async create(newCall: NewCall) {
+      // Mirrors the real Drizzle repository's onConflictDoNothing + re-fetch
+      // contract: a repeat (organizationId, callSid) is a safe no-op that
+      // returns the original row unchanged -- first-write-wins, never a
+      // second row, never an overwrite of disposition/timestamps/summary.
+      const k = key(newCall.organizationId, newCall.callSid);
+      const existing = items.get(k);
+      if (existing) return existing;
+
       const now = new Date();
-      const call: Call = { id: randomUUID(), ...newCall, createdAt: now, updatedAt: now };
-      items.set(call.id, call);
+      // M12 Step 6: normalize an omitted summary to null, matching the real
+      // Drizzle repository's nullable column (no default) -- a plain
+      // `...newCall` spread would otherwise leave summary as `undefined`
+      // when the caller didn't provide one, which is not a valid Call.
+      const call: Call = {
+        id: randomUUID(),
+        ...newCall,
+        summary: newCall.summary ?? null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      items.set(k, call);
       return call;
     },
   };
@@ -876,6 +927,14 @@ export function createInMemoryOrganizationSubscriptionRepository(): Organization
   return {
     async findByOrganizationId(organizationId) {
       return subscriptions.get(organizationId);
+    },
+    async findByStripeCustomerId(stripeCustomerId) {
+      return [...subscriptions.values()].find((s) => s.stripeCustomerId === stripeCustomerId);
+    },
+    async findByStripeSubscriptionId(stripeSubscriptionId) {
+      return [...subscriptions.values()].find(
+        (s) => s.stripeSubscriptionId === stripeSubscriptionId,
+      );
     },
     async upsert(newSubscription: NewOrganizationSubscription) {
       const existing = subscriptions.get(newSubscription.organizationId);
@@ -900,3 +959,49 @@ export function createInMemoryOrganizationSubscriptionRepository(): Organization
       subscriptions.set(organizationId, updated);
       return updated;
     },
+  };
+}
+
+export function createInMemoryStripeWebhookEventRepository(): StripeWebhookEventRepository {
+  const events = new Map<string, StripeWebhookEvent>();
+
+  return {
+    async insertIfAbsent(event: NewStripeWebhookEvent) {
+      // Mirrors the real Drizzle repository's onConflictDoNothing contract
+      // on the primary key (the Stripe event id) -- a repeat id is a safe
+      // no-op that returns undefined, never a second row, never an
+      // overwrite of a previously-recorded event.
+      if (events.has(event.id)) return undefined;
+
+      const created: StripeWebhookEvent = {
+        id: event.id,
+        type: event.type,
+        stripeSubscriptionId: event.stripeSubscriptionId,
+        organizationId: event.organizationId ?? null,
+        stripeCreatedAt: event.stripeCreatedAt,
+        applied: false,
+        receivedAt: new Date(),
+      };
+      events.set(created.id, created);
+      return created;
+    },
+
+    async findLatestAppliedForSubscription(stripeSubscriptionId) {
+      let latest: Date | undefined;
+      for (const event of events.values()) {
+        if (event.stripeSubscriptionId !== stripeSubscriptionId) continue;
+        if (!event.applied) continue;
+        if (!latest || event.stripeCreatedAt > latest) {
+          latest = event.stripeCreatedAt;
+        }
+      }
+      return latest;
+    },
+
+    async markApplied(eventId, organizationId) {
+      const existing = events.get(eventId);
+      if (!existing) return;
+      events.set(eventId, { ...existing, applied: true, organizationId });
+    },
+  };
+}

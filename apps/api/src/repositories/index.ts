@@ -17,6 +17,7 @@ import { createDrizzleServiceRepository } from "./drizzle/service.repository.js"
 import { createDrizzleSessionRepository } from "./drizzle/session.repository.js";
 import { createDrizzleSmsNotificationRepository } from "./drizzle/sms-notification.repository.js";
 import { createDrizzleSmsOptOutRepository } from "./drizzle/sms-opt-out.repository.js";
+import { createDrizzleStripeWebhookEventRepository } from "./drizzle/stripe-webhook-event.repository.js";
 import { createDrizzleUnitOfWork } from "./drizzle/unit-of-work.js";
 import { createDrizzleUserRepository } from "./drizzle/user.repository.js";
 import type { AppointmentRepository } from "./appointment-types.js";
@@ -38,6 +39,7 @@ import type {
 import type { ReceptionistConfigRepository } from "./receptionist-config-types.js";
 import type { SmsNotificationRepository } from "./sms-notification-types.js";
 import type { SmsOptOutRepository } from "./sms-opt-out-types.js";
+import type { StripeWebhookEventRepository } from "./stripe-webhook-event-types.js";
 import type { SessionRepository, UserRepository } from "./types.js";
 import type { UnitOfWork } from "./unit-of-work.js";
 
@@ -61,6 +63,7 @@ export interface Repositories {
   calls: CallRepository;
   smsNotifications: SmsNotificationRepository;
   smsOptOuts: SmsOptOutRepository;
+  stripeWebhookEvents: StripeWebhookEventRepository;
   unitOfWork: UnitOfWork;
 }
 
@@ -86,6 +89,7 @@ export function createRepositories(): Repositories {
     calls: createDrizzleCallRepository(db),
     smsNotifications: createDrizzleSmsNotificationRepository(db),
     smsOptOuts: createDrizzleSmsOptOutRepository(db),
+    stripeWebhookEvents: createDrizzleStripeWebhookEventRepository(db),
     unitOfWork: createDrizzleUnitOfWork(db),
   };
 }
@@ -110,4 +114,5 @@ export type { OrganizationCalendarConnectionRepository } from "./calendar-connec
 export type { SmsNotificationRepository } from "./sms-notification-types.js";
 export type { CallRepository } from "./call-types.js";
 export type { SmsOptOutRepository } from "./sms-opt-out-types.js";
+export type { StripeWebhookEventRepository } from "./stripe-webhook-event-types.js";
 export type { UnitOfWork } from "./unit-of-work.js";

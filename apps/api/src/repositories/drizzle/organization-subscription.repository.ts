@@ -36,6 +36,24 @@ export function createDrizzleOrganizationSubscriptionRepository(
       return row ? toDomain(row) : undefined;
     },
 
+    async findByStripeCustomerId(stripeCustomerId) {
+      const [row] = await db
+        .select()
+        .from(organizationSubscriptions)
+        .where(eq(organizationSubscriptions.stripeCustomerId, stripeCustomerId))
+        .limit(1);
+      return row ? toDomain(row) : undefined;
+    },
+
+    async findByStripeSubscriptionId(stripeSubscriptionId) {
+      const [row] = await db
+        .select()
+        .from(organizationSubscriptions)
+        .where(eq(organizationSubscriptions.stripeSubscriptionId, stripeSubscriptionId))
+        .limit(1);
+      return row ? toDomain(row) : undefined;
+    },
+
     async upsert(subscription: NewOrganizationSubscription) {
       const [row] = await db
         .insert(organizationSubscriptions)

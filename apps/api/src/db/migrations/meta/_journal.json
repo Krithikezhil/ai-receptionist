@@ -92,6 +92,13 @@
       "when": 1789550913331,
       "tag": "0013_giant_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789845480027,
+      "tag": "0014_living_shocker",
+      "breakpoints": true
     }
   ]
 }

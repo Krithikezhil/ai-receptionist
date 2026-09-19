@@ -43,6 +43,60 @@ describe("OrganizationSubscriptionRepository (in-memory) -- M13 Step 2", () => {
     });
   });
 
+  describe("findByStripeCustomerId", () => {
+    it("returns undefined when no subscription has this Stripe customer id", async () => {
+      const result = await repo.findByStripeCustomerId("cus_does_not_exist");
+      expect(result).toBeUndefined();
+    });
+
+    it("finds the subscription with a matching stripeCustomerId", async () => {
+      const organizationId = randomUUID();
+      await repo.upsert(newSubscription(organizationId, { stripeCustomerId: "cus_abc" }));
+
+      const found = await repo.findByStripeCustomerId("cus_abc");
+      expect(found?.organizationId).toBe(organizationId);
+    });
+
+    it("keeps two organizations' Stripe customer ids isolated", async () => {
+      const orgA = randomUUID();
+      const orgB = randomUUID();
+      await repo.upsert(newSubscription(orgA, { stripeCustomerId: "cus_a" }));
+      await repo.upsert(newSubscription(orgB, { stripeCustomerId: "cus_b" }));
+
+      const foundA = await repo.findByStripeCustomerId("cus_a");
+      const foundB = await repo.findByStripeCustomerId("cus_b");
+      expect(foundA?.organizationId).toBe(orgA);
+      expect(foundB?.organizationId).toBe(orgB);
+    });
+  });
+
+  describe("findByStripeSubscriptionId", () => {
+    it("returns undefined when no subscription has this Stripe subscription id", async () => {
+      const result = await repo.findByStripeSubscriptionId("sub_does_not_exist");
+      expect(result).toBeUndefined();
+    });
+
+    it("finds the subscription with a matching stripeSubscriptionId", async () => {
+      const organizationId = randomUUID();
+      await repo.upsert(newSubscription(organizationId, { stripeSubscriptionId: "sub_abc" }));
+
+      const found = await repo.findByStripeSubscriptionId("sub_abc");
+      expect(found?.organizationId).toBe(organizationId);
+    });
+
+    it("keeps two organizations' Stripe subscription ids isolated", async () => {
+      const orgA = randomUUID();
+      const orgB = randomUUID();
+      await repo.upsert(newSubscription(orgA, { stripeSubscriptionId: "sub_a" }));
+      await repo.upsert(newSubscription(orgB, { stripeSubscriptionId: "sub_b" }));
+
+      const foundA = await repo.findByStripeSubscriptionId("sub_a");
+      const foundB = await repo.findByStripeSubscriptionId("sub_b");
+      expect(foundA?.organizationId).toBe(orgA);
+      expect(foundB?.organizationId).toBe(orgB);
+    });
+  });
+
   describe("upsert", () => {
     it("creates a subscription row on first call, matching the supplied fields", async () => {
       const organizationId = randomUUID();

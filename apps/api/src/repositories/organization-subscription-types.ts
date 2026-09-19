@@ -2,7 +2,8 @@ export type OrganizationSubscriptionStatus =
   | "active"
   | "past_due"
   | "canceled"
-  | "incomplete";
+  | "incomplete"
+  | "paused";
 
 /**
  * M13 Step 2: at most one local subscription-state row per organization
@@ -42,6 +43,25 @@ export interface OrganizationSubscriptionUpdate {
 export interface OrganizationSubscriptionRepository {
   findByOrganizationId(
     organizationId: string,
+  ): Promise<OrganizationSubscription | undefined>;
+
+  /**
+   * Webhook-sync lookup: resolves the organization already associated
+   * with a given Stripe customer id, if any. Used by the future Stripe
+   * webhook sync service to attribute an event to the correct
+   * organization -- never used to accept a caller-supplied organizationId.
+   */
+  findByStripeCustomerId(
+    stripeCustomerId: string,
+  ): Promise<OrganizationSubscription | undefined>;
+
+  /**
+   * Same as findByStripeCustomerId, keyed by Stripe subscription id
+   * instead -- an event may only carry the subscription id (not the
+   * customer id) depending on which resolution path succeeds first.
+   */
+  findByStripeSubscriptionId(
+    stripeSubscriptionId: string,
   ): Promise<OrganizationSubscription | undefined>;
 
   upsert(

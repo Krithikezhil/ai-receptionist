@@ -622,7 +622,7 @@ export const organizationSubscriptions = pgTable("organization_subscriptions", {
   stripeSubscriptionId: text("stripe_subscription_id").unique(),
   plan: text("plan"),
   status: text("status", {
-    enum: ["active", "past_due", "canceled", "incomplete"],
+    enum: ["active", "past_due", "canceled", "incomplete", "paused"],
   }),
   currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -631,3 +631,55 @@ export const organizationSubscriptions = pgTable("organization_subscriptions", {
 
 export type OrganizationSubscriptionRow = typeof organizationSubscriptions.$inferSelect;
 export type NewOrganizationSubscriptionRow = typeof organizationSubscriptions.$inferInsert;
+
+/**
+ * M13 webhook-sync scaffold: dedupe/ordering record for verified Stripe
+ * webhook events (customer.subscription.created|updated|deleted only --
+ * see the approved design). `id` is the Stripe event id itself (e.g.
+ * "evt_...") used directly as the primary key -- this IS the dedupe
+ * mechanism: a second delivery of the same event id fails the unique
+ * constraint (surfaced as an onConflictDoNothing no-op by the
+ * repository), not a second row. organizationId is nullable: an event
+ * whose subscription cannot be attributed to any organization (no
+ * existing local association, no verified metadata.organizationId) is
+ * still recorded here with organizationId left null -- a safe no-op, not
+ * an error, per the approved resolution design (see
+ * organization-subscription-types.ts). applied distinguishes a row that
+ * actually updated organization_subscriptions from one that was recorded
+ * but deliberately not applied (duplicate, stale/out-of-order, or
+ * unresolved organization) -- ordering DECISIONS belong to the future
+ * sync service, not this table or its repository; this table only
+ * supplies the facts (which events exist, which were applied, and when)
+ * that decision is made from. stripeCreatedAt is Stripe's own
+ * event.created timestamp (not receivedAt, which is purely local
+ * bookkeeping) -- it is the basis for out-of-order detection: the sync
+ * service compares a new event's stripeCreatedAt against the latest
+ * already-applied event's stripeCreatedAt for the same subscription.
+ * No retention/cleanup policy exists yet for this table -- rows
+ * accumulate indefinitely; this is a known, documented, deliberately
+ * deferred operational concern, not a permanent production policy.
+ */
+export const stripeWebhookEvents = pgTable(
+  "stripe_webhook_events",
+  {
+    id: text("id").primaryKey(),
+    type: text("type").notNull(),
+    stripeSubscriptionId: text("stripe_subscription_id").notNull(),
+    organizationId: uuid("organization_id").references(() => organizations.id, {
+      onDelete: "cascade",
+    }),
+    stripeCreatedAt: timestamp("stripe_created_at", { withTimezone: true }).notNull(),
+    applied: boolean("applied").notNull().default(false),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("stripe_webhook_events_subscription_created_idx").on(
+      t.stripeSubscriptionId,
+      t.stripeCreatedAt,
+    ),
+    index("stripe_webhook_events_organization_id_idx").on(t.organizationId),
+  ],
+);
+
+export type StripeWebhookEventRow = typeof stripeWebhookEvents.$inferSelect;
+export type NewStripeWebhookEventRow = typeof stripeWebhookEvents.$inferInsert;
