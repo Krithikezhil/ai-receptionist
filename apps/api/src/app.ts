@@ -38,6 +38,10 @@ import {
   type OrganizationService,
 } from "./services/organization.service.js";
 import {
+  createOrganizationSubscriptionService,
+  type OrganizationSubscriptionService,
+} from "./services/organization-subscription.service.js";
+import {
   createPhoneNumberService,
   type PhoneNumberService,
 } from "./services/phone-number.service.js";
@@ -82,6 +86,7 @@ export interface AppDependencies {
    * used by the M11 Step 4 Twilio SMS inbound webhook (tenant-scoped
    * opt-out state). */
   smsOptOuts?: SmsOptOutRepository;
+  organizationSubscriptionService?: OrganizationSubscriptionService;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
@@ -184,6 +189,12 @@ export function createApp(deps: AppDependencies = {}): Express {
   // other service composed in, unlike appointmentService/leadService
   // above (no SMS/calendar side effect exists for a call record).
   const callService = deps.callService ?? createCallService(repos.calls);
+  // M13 Step 3: constructed directly from the repository bundle, same
+  // pattern as callService above -- read-only, no other service composed
+  // in, no Stripe/network call.
+  const organizationSubscriptionService =
+    deps.organizationSubscriptionService ??
+    createOrganizationSubscriptionService(repos.organizationSubscriptions);
 
   const app = express();
 
@@ -214,6 +225,7 @@ export function createApp(deps: AppDependencies = {}): Express {
         phoneNumberService,
         appointmentService,
         calendarConnectionService,
+        organizationSubscriptionService,
       },
       {
         organizationService,

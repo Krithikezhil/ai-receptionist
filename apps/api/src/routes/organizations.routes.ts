@@ -6,6 +6,7 @@ import { createCalendarConnectionController } from "../controllers/calendar-conn
 import { createKnowledgeController } from "../controllers/knowledge.controller.js";
 import { createLeadController } from "../controllers/lead.controller.js";
 import { createOrganizationController } from "../controllers/organization.controller.js";
+import { createOrganizationSubscriptionController } from "../controllers/organization-subscription.controller.js";
 import { createPhoneNumberController } from "../controllers/phone-number.controller.js";
 import { createReceptionistConfigController } from "../controllers/receptionist-config.controller.js";
 import { createServiceCatalogController } from "../controllers/service-catalog.controller.js";
@@ -20,6 +21,7 @@ import type { CalendarConnectionService } from "../services/calendar-connection.
 import type { KnowledgeService } from "../services/knowledge.service.js";
 import type { LeadService } from "../services/lead.service.js";
 import type { OrganizationService } from "../services/organization.service.js";
+import type { OrganizationSubscriptionService } from "../services/organization-subscription.service.js";
 import type { PhoneNumberService } from "../services/phone-number.service.js";
 import type { ReceptionistConfigService } from "../services/receptionist-config.service.js";
 import type { ServicesCatalogService } from "../services/services-catalog.service.js";
@@ -37,6 +39,7 @@ export interface OrganizationRouterDeps {
   phoneNumberService: PhoneNumberService;
   appointmentService: AppointmentService;
   calendarConnectionService: CalendarConnectionService;
+  organizationSubscriptionService: OrganizationSubscriptionService;
 }
 
 export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router {
@@ -54,6 +57,7 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   const phoneNumbers = createPhoneNumberController(deps.phoneNumberService);
   const appointments = createAppointmentController(deps.appointmentService);
   const calendarConnection = createCalendarConnectionController(deps.calendarConnectionService);
+  const subscription = createOrganizationSubscriptionController(deps.organizationSubscriptionService);
 
   router.post("/", auth, org.create);
   router.get("/", auth, org.list);
@@ -119,6 +123,12 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   router.get("/:organizationId/calendar", auth, membership, calendarConnection.getStatus);
   router.post("/:organizationId/calendar", auth, membership, calendarConnection.connect);
   router.delete("/:organizationId/calendar", auth, membership, calendarConnection.disconnect);
+
+  // M13 Step 3: read-only local subscription status -- open to any member,
+  // same as every other read endpoint above. Absence of a row is a normal
+  // 200 ({plan: null, status: null, currentPeriodEnd: null}), not a 404 --
+  // see organization-subscription.service.ts.
+  router.get("/:organizationId/subscription", auth, membership, subscription.getStatus);
 
   return router;
 }

@@ -9,6 +9,7 @@ import { createEmbeddingProvider } from "../../src/services/embedding-provider.j
 import { createKnowledgeService } from "../../src/services/knowledge.service.js";
 import { createLeadService } from "../../src/services/lead.service.js";
 import { createOrganizationService } from "../../src/services/organization.service.js";
+import { createOrganizationSubscriptionService } from "../../src/services/organization-subscription.service.js";
 import { createPhoneNumberService } from "../../src/services/phone-number.service.js";
 import { createReceptionistConfigService } from "../../src/services/receptionist-config.service.js";
 import { createServicesCatalogService } from "../../src/services/services-catalog.service.js";
@@ -29,6 +30,7 @@ import {
   createInMemoryOrganizationPhoneNumberRepository,
   createInMemoryOrganizationRepositories,
   createInMemoryOrganizationServiceCredentialRepository,
+  createInMemoryOrganizationSubscriptionRepository,
   createInMemoryReceptionistConfigRepository,
   createInMemoryServiceRepository,
   createInMemorySmsNotificationRepository,
@@ -90,6 +92,7 @@ export function buildTestApp() {
   const receptionistConfigs = createInMemoryReceptionistConfigRepository();
   const organizationServiceCredentials = createInMemoryOrganizationServiceCredentialRepository();
   const organizationPhoneNumbers = createInMemoryOrganizationPhoneNumberRepository();
+  const organizationSubscriptions = createInMemoryOrganizationSubscriptionRepository();
   const leads = createInMemoryLeadRepository();
   const smsNotifications = createInMemorySmsNotificationRepository();
   const smsOptOuts = createInMemorySmsOptOutRepository();
@@ -127,6 +130,9 @@ export function buildTestApp() {
     smsNotificationService,
   );
   const callService = createCallService(calls);
+  const organizationSubscriptionService = createOrganizationSubscriptionService(
+    organizationSubscriptions,
+  );
 
   const deps: Required<AppDependencies> = {
     authService,
@@ -150,6 +156,7 @@ export function buildTestApp() {
     twilioCallCredentialSecret: TEST_TWILIO_CALL_CREDENTIAL_SECRET,
     smsNotifications,
     smsOptOuts,
+    organizationSubscriptionService,
   };
 
   const app = createApp(deps);
@@ -176,5 +183,6 @@ export function buildTestApp() {
     organizationServiceCredentials,
     organizationPhoneNumbers,
     smsOptOuts,
+    organizationSubscriptions,
   };
 }
