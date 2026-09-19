@@ -24,6 +24,12 @@ import type {
 } from "../../src/repositories/knowledge-types.js";
 import type { Lead, LeadRepository, NewLead } from "../../src/repositories/lead-types.js";
 import type {
+  NewOrganizationSubscription,
+  OrganizationSubscription,
+  OrganizationSubscriptionRepository,
+  OrganizationSubscriptionUpdate,
+} from "../../src/repositories/organization-subscription-types.js";
+import type {
   BusinessHoursEntry,
   BusinessHoursRepository,
   BusinessProfile,
@@ -863,3 +869,34 @@ export function createInMemoryCallRepository(): CallRepository {
     },
   };
 }
+
+export function createInMemoryOrganizationSubscriptionRepository(): OrganizationSubscriptionRepository {
+  const subscriptions = new Map<string, OrganizationSubscription>();
+
+  return {
+    async findByOrganizationId(organizationId) {
+      return subscriptions.get(organizationId);
+    },
+    async upsert(newSubscription: NewOrganizationSubscription) {
+      const existing = subscriptions.get(newSubscription.organizationId);
+      const now = new Date();
+      const subscription: OrganizationSubscription = {
+        organizationId: newSubscription.organizationId,
+        stripeCustomerId: newSubscription.stripeCustomerId ?? null,
+        stripeSubscriptionId: newSubscription.stripeSubscriptionId ?? null,
+        plan: newSubscription.plan ?? null,
+        status: newSubscription.status ?? null,
+        currentPeriodEnd: newSubscription.currentPeriodEnd ?? null,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      subscriptions.set(subscription.organizationId, subscription);
+      return subscription;
+    },
+    async update(organizationId, changes: OrganizationSubscriptionUpdate) {
+      const existing = subscriptions.get(organizationId);
+      if (!existing) return undefined;
+      const updated = { ...existing, ...changes, updatedAt: new Date() };
+      subscriptions.set(organizationId, updated);
+      return updated;
+    },
