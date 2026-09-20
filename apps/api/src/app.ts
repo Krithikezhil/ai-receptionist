@@ -13,6 +13,7 @@ import type { SmsNotificationRepository } from "./repositories/sms-notification-
 import type { SmsOptOutRepository } from "./repositories/sms-opt-out-types.js";
 import { createRepositories } from "./repositories/index.js";
 import { createApiRouter } from "./routes/index.js";
+import { createStripeWebhookRouter } from "./routes/stripe-webhook.routes.js";
 import { createTwilioSmsRouter } from "./routes/twilio-sms.routes.js";
 import { createAppointmentService, type AppointmentService } from "./services/appointment.service.js";
 import { createAuthService, type AuthService } from "./services/auth.service.js";
@@ -200,6 +201,12 @@ export function createApp(deps: AppDependencies = {}): Express {
 
   app.use(helmet());
   app.use(cors({ origin: env.corsOrigin, credentials: true }));
+  // Mounted BEFORE the global express.json() below -- Stripe's payload is
+  // application/json, so if the global parser ran first it would consume
+  // and re-serialize the body before this route's own express.raw() ever
+  // saw it, destroying the exact bytes signature verification needs. See
+  // routes/stripe-webhook.routes.ts.
+  app.use("/stripe", createStripeWebhookRouter());
   app.use(express.json());
   app.use(
     pinoHttp({
