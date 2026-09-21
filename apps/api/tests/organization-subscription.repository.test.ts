@@ -117,6 +117,7 @@ describe("OrganizationSubscriptionRepository (in-memory) -- M13 Step 2", () => {
         plan: "pro",
         status: "active",
         currentPeriodEnd: new Date("2030-02-01T00:00:00.000Z"),
+        currentPeriodStart: null,
         createdAt: new Date("2030-01-01T00:00:00.000Z"),
         updatedAt: new Date("2030-01-01T00:00:00.000Z"),
       });

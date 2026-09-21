@@ -20,17 +20,39 @@ import type { StripeWebhookEventRepository } from "../repositories/stripe-webhoo
 export class MalformedStripeEventError extends Error {}
 
 /**
+ * A single subscription item's shape, as far as this service reads it.
+ * `price.recurring.usage_type` is the verified, documented Stripe field
+ * ("licensed" vs "metered") this service uses to identify the $2,500/mo
+ * recurring price among a subscription's items -- see
+ * resolveLicensedItem's own doc comment for why this, and never
+ * positional (items[0]) selection, is required once a subscription can
+ * legitimately carry more than one item (the approved licensed + metered
+ * overage architecture). `current_period_start`/`current_period_end` are
+ * the verified, documented Stripe fields (as of API version
+ * 2025-03-31.basil and later) for a subscription item's own billing
+ * period boundaries -- Stripe Unix-second timestamps, read only from the
+ * resolved licensed item (see toStripeTimestampDate and processEvent's
+ * period-handling below), never from the metered item and never inferred.
+ */
+export interface StripeSubscriptionLineItem {
+  price?: {
+    id?: string;
+    recurring?: {
+      usage_type?: string;
+    };
+  };
+  current_period_start?: number;
+  current_period_end?: number;
+}
+
+/**
  * The minimal shape this service reads from a Stripe event -- hand-typed
  * because no Stripe SDK/types package is installed in this repository
- * (intentional, see the approved M13 webhook design). Deliberately does
- * NOT include current_period_end: its exact field location depends on
- * which Stripe API version this integration eventually pins, which is
- * not yet decided anywhere in this repository (no Stripe package, no
- * pinned API version in any doc/config) -- see the mutation branch in
- * processEvent() below for the full rationale, including why an
- * existing-row update() must never include this field. Extending this
- * shape (and the mapping below) once that version is chosen is a small,
- * additive follow-up, not a redesign.
+ * (intentional, see the approved M13 webhook design). Billing-period
+ * boundaries are deliberately NOT read from this top-level object: Stripe's
+ * current documented API shape (2025-03-31.basil and later) puts
+ * current_period_start/current_period_end on each subscription item, not
+ * on the subscription itself -- see StripeSubscriptionLineItem.
  */
 export interface StripeWebhookEventPayload {
   id: string;
@@ -43,7 +65,7 @@ export interface StripeWebhookEventPayload {
       status: string;
       metadata?: Record<string, unknown> | null;
       items?: {
-        data: Array<{ price?: { id?: string } }>;
+        data: StripeSubscriptionLineItem[];
       };
     };
   };
@@ -125,6 +147,54 @@ export function parseStripeWebhookEventPayload(rawBody: string): StripeWebhookEv
  */
 function mapStripeStatus(stripeStatus: string): OrganizationSubscriptionStatus | null {
   return STRIPE_STATUS_TO_LOCAL[stripeStatus] ?? null;
+}
+
+/**
+ * Identifies the $2,500/mo licensed recurring subscription item -- via
+ * Stripe's own price.recurring.usage_type field ("licensed" vs "metered"),
+ * never a positional items[0] selection. The approved billing architecture
+ * gives a real subscription exactly one licensed item (the recurring plan)
+ * plus at most one metered item (the AI-minute overage price); this
+ * function returns undefined -- meaning "cannot safely resolve, do not
+ * mutate" -- for any shape other than that: zero or multiple licensed
+ * items, more than one metered item, or any item whose usage_type isn't
+ * one of the two recognized values. Deliberately fails closed rather than
+ * guessing, mirroring this service's existing conventions for unresolvable
+ * state (see processEvent's organization-resolution and multi-item
+ * handling). Returns the whole item (not just its Price ID) because
+ * processEvent also reads this SAME item's current_period_start/end --
+ * the licensed item is the sole source for both plan and billing-period
+ * values, never the metered item.
+ */
+function resolveLicensedItem(
+  items: StripeSubscriptionLineItem[],
+): StripeSubscriptionLineItem | undefined {
+  const licensed = items.filter((item) => item.price?.recurring?.usage_type === "licensed");
+  const metered = items.filter((item) => item.price?.recurring?.usage_type === "metered");
+
+  if (licensed.length !== 1) return undefined;
+  if (metered.length > 1) return undefined;
+  // Every item must be recognized as either the licensed plan item or a
+  // metered overage item -- an item with a missing/unrecognized
+  // usage_type means this isn't the approved billing structure.
+  if (licensed.length + metered.length !== items.length) return undefined;
+
+  return licensed[0];
+}
+
+/**
+ * Converts a Stripe Unix-seconds timestamp to a Date -- returns undefined
+ * for anything that isn't genuinely a valid timestamp (missing, wrong
+ * type, NaN, Infinity, negative), never a fallback/guessed date. Callers
+ * treat undefined as "Stripe did not supply a usable value here," which is
+ * handled differently for an existing row (preserve the current local
+ * value, see processEvent) versus first-ever creation (store null).
+ */
+function toStripeTimestampDate(value: unknown): Date | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return new Date(value * 1000);
 }
 
 /**
@@ -257,11 +327,22 @@ export function createStripeSubscriptionSyncService(
 
         if (organizationId === null) return; // unresolved organization
 
-        // Multi-item guard -- checked BEFORE any items.data[0] access,
-        // never a silent first-item selection for a multi-item
-        // subscription.
+        // Item resolution -- identifies the licensed recurring item via
+        // Stripe's own price.recurring.usage_type field, never a
+        // positional items[0] selection (see resolveLicensedItem's own
+        // doc comment). Checked at the same bail-out point the previous
+        // single-item guard occupied: an unresolvable item shape (missing
+        // usage_type, wrong item counts) is recorded via the dedupe
+        // insert above but never mutates local state, exactly like an
+        // unresolved organization. This same item is the sole source for
+        // both plan (below) and the period fields (below) -- never the
+        // metered item.
         const items = subscription.items?.data ?? [];
-        if (items.length !== 1) return;
+        const licensedItem = resolveLicensedItem(items);
+        if (licensedItem === undefined) return;
+
+        const plan = licensedItem.price?.id;
+        if (typeof plan !== "string") return;
 
         // Locks the existing row for this subscription, if one exists.
         // Protects every write after the very first one for a given
@@ -278,44 +359,51 @@ export function createStripeSubscriptionSyncService(
         }
 
         const status = mapStripeStatus(subscription.status);
-        const plan = items[0]?.price?.id ?? null;
+        // Period fields come exclusively from the resolved licensed item
+        // (never the metered item, never a computed/fallback value) --
+        // undefined means Stripe did not supply a usable value, handled
+        // differently per branch immediately below.
+        const currentPeriodStart = toStripeTimestampDate(licensedItem.current_period_start);
+        const currentPeriodEnd = toStripeTimestampDate(licensedItem.current_period_end);
 
-        // currentPeriodEnd is deliberately never set by this webhook path
-        // -- see this file's top-of-file comment on
-        // StripeWebhookEventPayload -- until the Stripe API version this
-        // integration targets is decided and the field's real location
-        // confirmed against Stripe's own documentation.
         if (existingSubscription) {
           // Existing row: partial update() only, touching exactly the
           // fields this webhook sync owns (stripeCustomerId,
-          // stripeSubscriptionId, plan, status). currentPeriodEnd is
-          // intentionally absent from this object -- update()'s
-          // implementation only SETs the keys actually present, so any
-          // currentPeriodEnd value already on the row (however it got
-          // there) is left completely untouched, never reset to null.
-          // Using the full-replacement upsert() here would silently null
-          // it out on every webhook event -- see SECURITY.md/this
-          // service's change history for why update() is required for
-          // this branch.
+          // stripeSubscriptionId, plan, status, and -- conditionally --
+          // the period fields). update()'s implementation only SETs the
+          // keys actually present, so a period field is included ONLY
+          // when this event supplied a genuinely valid value; when
+          // Stripe omitted it (or it failed validation), the key is left
+          // out of this object entirely, and any value already on the
+          // row is left completely untouched, never reset to null. Using
+          // the full-replacement upsert() here would silently null both
+          // fields out on every webhook event that happened to omit
+          // them -- see SECURITY.md/this service's change history for
+          // why update() is required for this branch.
           await repos.organizationSubscriptions.update(organizationId, {
             stripeCustomerId: subscription.customer,
             stripeSubscriptionId: subscription.id,
             plan,
             status,
+            ...(currentPeriodStart !== undefined ? { currentPeriodStart } : {}),
+            ...(currentPeriodEnd !== undefined ? { currentPeriodEnd } : {}),
           });
         } else {
           // First-ever subscription state for this organization -- there
           // is nothing for a partial update() to modify, so upsert()
-          // (insert) is used instead. currentPeriodEnd is omitted here
-          // too and remains null via upsert()'s own `?? null` default --
-          // this is a real absence of data (never set anywhere yet), not
-          // an overwrite of an existing value.
+          // (insert) is used instead. Each period field is explicitly
+          // set to its resolved Date, or to null when genuinely
+          // absent/invalid -- upsert()'s own `?? null` default handles
+          // that null case, and this is a real absence of data (never
+          // set anywhere yet), not an overwrite of an existing value.
           await repos.organizationSubscriptions.upsert({
             organizationId,
             stripeCustomerId: subscription.customer,
             stripeSubscriptionId: subscription.id,
             plan,
             status,
+            currentPeriodStart: currentPeriodStart ?? null,
+            currentPeriodEnd: currentPeriodEnd ?? null,
           });
         }
 

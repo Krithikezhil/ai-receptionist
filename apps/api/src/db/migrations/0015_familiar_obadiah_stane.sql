@@ -1,0 +1,1 @@
+ALTER TABLE "organization_subscriptions" ADD COLUMN "current_period_start" timestamp with time zone;

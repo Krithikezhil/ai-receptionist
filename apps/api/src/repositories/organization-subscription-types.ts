@@ -19,6 +19,7 @@ export interface OrganizationSubscription {
   plan: string | null;
   status: OrganizationSubscriptionStatus | null;
   currentPeriodEnd: Date | null;
+  currentPeriodStart: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -30,6 +31,7 @@ export interface NewOrganizationSubscription {
   plan?: string | null;
   status?: OrganizationSubscriptionStatus | null;
   currentPeriodEnd?: Date | null;
+  currentPeriodStart?: Date | null;
 }
 
 export interface OrganizationSubscriptionUpdate {
@@ -38,6 +40,7 @@ export interface OrganizationSubscriptionUpdate {
   plan?: string | null;
   status?: OrganizationSubscriptionStatus | null;
   currentPeriodEnd?: Date | null;
+  currentPeriodStart?: Date | null;
 }
 
 export interface OrganizationSubscriptionRepository {

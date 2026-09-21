@@ -42,6 +42,31 @@ function buildService() {
   return { service, repos };
 }
 
+/**
+ * price.recurring.usage_type is the verified, documented Stripe field
+ * ("licensed" vs "metered") the service now uses to resolve the licensed
+ * item -- see resolveLicensedItem in stripe-subscription-sync.service.ts.
+ * Test fixtures must supply it explicitly; there is no positional
+ * (items[0]) fallback anymore. current_period_start/current_period_end
+ * mirror StripeSubscriptionLineItem's own fields -- typed `number` to
+ * match production, with individual malformed-value tests casting a
+ * literal through `as unknown as TestSubscriptionItem` where a genuinely
+ * invalid runtime value (string, NaN, Infinity, negative) is required,
+ * the same way a real un-validated JSON payload could carry one.
+ */
+type TestSubscriptionItem = {
+  price?: { id?: string; recurring?: { usage_type?: string } };
+  current_period_start?: number;
+  current_period_end?: number;
+};
+
+/** A single licensed-only item -- the default, minimal valid shape: a
+ * subscription that has the $2,500 recurring plan but no metered overage
+ * item yet. */
+const LICENSED_ITEM: TestSubscriptionItem = {
+  price: { id: "price_123", recurring: { usage_type: "licensed" } },
+};
+
 function makeEvent(overrides: {
   id?: string;
   type?: string;
@@ -50,7 +75,7 @@ function makeEvent(overrides: {
   customerId?: string;
   status?: string;
   metadata?: Record<string, unknown> | null;
-  items?: Array<{ price?: { id?: string } }>;
+  items?: TestSubscriptionItem[];
 } = {}): StripeWebhookEventPayload {
   const {
     id = `evt_${randomUUID()}`,
@@ -60,7 +85,7 @@ function makeEvent(overrides: {
     customerId = `cus_${randomUUID()}`,
     status = "active",
     metadata = null,
-    items = [{ price: { id: "price_123" } }],
+    items = [LICENSED_ITEM],
   } = overrides;
   return {
     id,
@@ -335,7 +360,57 @@ describe("StripeSubscriptionSyncService", () => {
   });
 
   describe("multi-item subscriptions", () => {
-    it("records the event with applied=false and never mutates local state", async () => {
+    it("synchronizes successfully for the approved licensed + metered shape, storing the licensed price as plan", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        status: "active",
+        items: [
+          { price: { id: "price_metered_overage", recurring: { usage_type: "metered" } } },
+          { price: { id: "price_licensed_2500", recurring: { usage_type: "licensed" } } },
+        ],
+      });
+
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      // plan is the licensed recurring price, never the metered overage
+      // price, and never selected positionally (the licensed item is
+      // deliberately placed second in this fixture's items array).
+      expect(sub?.plan).toBe("price_licensed_2500");
+      expect(sub?.status).toBe("active");
+    });
+
+    it("preserves an existing non-null currentPeriodEnd when synchronizing a two-item subscription", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const subscriptionId = `sub_${randomUUID()}`;
+      const existingPeriodEnd = new Date("2030-06-01T00:00:00.000Z");
+      await repos.organizationSubscriptions.upsert({
+        organizationId: org.id,
+        stripeSubscriptionId: subscriptionId,
+        status: "incomplete",
+        currentPeriodEnd: existingPeriodEnd,
+      });
+
+      const event = makeEvent({
+        subscriptionId,
+        status: "active",
+        created: Math.floor(Date.now() / 1000) + 100,
+        items: [
+          { price: { id: "price_licensed_2500", recurring: { usage_type: "licensed" } } },
+          { price: { id: "price_metered_overage", recurring: { usage_type: "metered" } } },
+        ],
+      });
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.plan).toBe("price_licensed_2500");
+      expect(sub?.currentPeriodEnd).toEqual(existingPeriodEnd);
+    });
+
+    it("does not select an item positionally and does not mutate when no item has a recognized usage_type", async () => {
       const { service, repos } = buildService();
       const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
       const event = makeEvent({
@@ -350,6 +425,283 @@ describe("StripeSubscriptionSyncService", () => {
       expect(
         await repos.stripeWebhookEvents.findLatestAppliedForSubscription(event.data.object.id),
       ).toBeUndefined();
+    });
+
+    it("does not mutate when two items both claim to be the licensed price (ambiguous)", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        items: [
+          { price: { id: "price_a", recurring: { usage_type: "licensed" } } },
+          { price: { id: "price_b", recurring: { usage_type: "licensed" } } },
+        ],
+      });
+
+      await service.processEvent(event);
+
+      expect(await eventAlreadyRecorded(repos, event)).toBe(true);
+      expect(await repos.organizationSubscriptions.findByOrganizationId(org.id)).toBeUndefined();
+    });
+
+    it("does not mutate when a licensed item is accompanied by more than one metered item", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        items: [
+          { price: { id: "price_licensed_2500", recurring: { usage_type: "licensed" } } },
+          { price: { id: "price_metered_1", recurring: { usage_type: "metered" } } },
+          { price: { id: "price_metered_2", recurring: { usage_type: "metered" } } },
+        ],
+      });
+
+      await service.processEvent(event);
+
+      expect(await eventAlreadyRecorded(repos, event)).toBe(true);
+      expect(await repos.organizationSubscriptions.findByOrganizationId(org.id)).toBeUndefined();
+    });
+  });
+
+  describe("billing period extraction (currentPeriodStart/currentPeriodEnd from the licensed item)", () => {
+    it("uses the licensed item's period values, never the metered item's", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const licensedStart = Math.floor(new Date("2030-01-01T00:00:00.000Z").getTime() / 1000);
+      const licensedEnd = Math.floor(new Date("2030-02-01T00:00:00.000Z").getTime() / 1000);
+      const meteredStart = Math.floor(new Date("2031-01-01T00:00:00.000Z").getTime() / 1000);
+      const meteredEnd = Math.floor(new Date("2031-02-01T00:00:00.000Z").getTime() / 1000);
+
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        status: "active",
+        items: [
+          {
+            price: { id: "price_metered_overage", recurring: { usage_type: "metered" } },
+            current_period_start: meteredStart,
+            current_period_end: meteredEnd,
+          },
+          {
+            price: { id: "price_licensed_2500", recurring: { usage_type: "licensed" } },
+            current_period_start: licensedStart,
+            current_period_end: licensedEnd,
+          },
+        ],
+      });
+
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).toEqual(new Date("2030-01-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodEnd).toEqual(new Date("2030-02-01T00:00:00.000Z"));
+    });
+
+    it("never persists the metered item's period values, even when they differ from the licensed item's", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const licensedStart = Math.floor(new Date("2032-05-01T00:00:00.000Z").getTime() / 1000);
+      const licensedEnd = Math.floor(new Date("2032-06-01T00:00:00.000Z").getTime() / 1000);
+      const meteredStart = Math.floor(new Date("2033-05-01T00:00:00.000Z").getTime() / 1000);
+      const meteredEnd = Math.floor(new Date("2033-06-01T00:00:00.000Z").getTime() / 1000);
+
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        status: "active",
+        items: [
+          {
+            price: { id: "price_licensed_2500", recurring: { usage_type: "licensed" } },
+            current_period_start: licensedStart,
+            current_period_end: licensedEnd,
+          },
+          {
+            price: { id: "price_metered_overage", recurring: { usage_type: "metered" } },
+            current_period_start: meteredStart,
+            current_period_end: meteredEnd,
+          },
+        ],
+      });
+
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).not.toEqual(new Date("2033-05-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodEnd).not.toEqual(new Date("2033-06-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodStart).toEqual(new Date("2032-05-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodEnd).toEqual(new Date("2032-06-01T00:00:00.000Z"));
+    });
+
+    it("stores the licensed item's valid period values as Dates for a first-ever subscription", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const periodStart = Math.floor(new Date("2030-03-01T00:00:00.000Z").getTime() / 1000);
+      const periodEnd = Math.floor(new Date("2030-04-01T00:00:00.000Z").getTime() / 1000);
+
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        status: "active",
+        items: [
+          {
+            price: { id: "price_123", recurring: { usage_type: "licensed" } },
+            current_period_start: periodStart,
+            current_period_end: periodEnd,
+          },
+        ],
+      });
+
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).toEqual(new Date("2030-03-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodEnd).toEqual(new Date("2030-04-01T00:00:00.000Z"));
+    });
+
+    it("stores null for both period fields when the licensed item omits them entirely on first-ever creation", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const event = makeEvent({
+        metadata: { organizationId: org.id },
+        status: "active",
+        items: [LICENSED_ITEM], // no current_period_start/current_period_end at all
+      });
+
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).toBeNull();
+      expect(sub?.currentPeriodEnd).toBeNull();
+    });
+
+    it.each<[string, unknown]>([
+      ["a non-number string", "not-a-number"],
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+      ["a negative value", -1],
+    ])(
+      "stores null for both period fields when the licensed item's period values are %s, on first-ever creation",
+      async (_label, invalidValue) => {
+        const { service, repos } = buildService();
+        const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+        const item = {
+          price: { id: "price_123", recurring: { usage_type: "licensed" } },
+          current_period_start: invalidValue,
+          current_period_end: invalidValue,
+        } as unknown as TestSubscriptionItem;
+
+        const event = makeEvent({
+          metadata: { organizationId: org.id },
+          status: "active",
+          items: [item],
+        });
+
+        await service.processEvent(event);
+
+        const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+        expect(sub?.currentPeriodStart).toBeNull();
+        expect(sub?.currentPeriodEnd).toBeNull();
+      },
+    );
+
+    it("preserves an existing currentPeriodStart when the licensed item omits it, while still updating a supplied currentPeriodEnd", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const subscriptionId = `sub_${randomUUID()}`;
+      const existingStart = new Date("2030-01-01T00:00:00.000Z");
+      const existingEnd = new Date("2030-02-01T00:00:00.000Z");
+      await repos.organizationSubscriptions.upsert({
+        organizationId: org.id,
+        stripeSubscriptionId: subscriptionId,
+        status: "incomplete",
+        currentPeriodStart: existingStart,
+        currentPeriodEnd: existingEnd,
+      });
+
+      const newEnd = Math.floor(new Date("2030-03-01T00:00:00.000Z").getTime() / 1000);
+      const event = makeEvent({
+        subscriptionId,
+        status: "active",
+        created: Math.floor(Date.now() / 1000) + 100,
+        items: [
+          {
+            price: { id: "price_123", recurring: { usage_type: "licensed" } },
+            // current_period_start intentionally omitted -- must not null
+            // out the existing value.
+            current_period_end: newEnd,
+          },
+        ],
+      });
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).toEqual(existingStart);
+      expect(sub?.currentPeriodEnd).toEqual(new Date("2030-03-01T00:00:00.000Z"));
+    });
+
+    it("preserves an existing currentPeriodEnd when the licensed item omits it, while still updating a supplied currentPeriodStart", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const subscriptionId = `sub_${randomUUID()}`;
+      const existingStart = new Date("2030-01-01T00:00:00.000Z");
+      const existingEnd = new Date("2030-02-01T00:00:00.000Z");
+      await repos.organizationSubscriptions.upsert({
+        organizationId: org.id,
+        stripeSubscriptionId: subscriptionId,
+        status: "incomplete",
+        currentPeriodStart: existingStart,
+        currentPeriodEnd: existingEnd,
+      });
+
+      const newStart = Math.floor(new Date("2029-12-01T00:00:00.000Z").getTime() / 1000);
+      const event = makeEvent({
+        subscriptionId,
+        status: "active",
+        created: Math.floor(Date.now() / 1000) + 100,
+        items: [
+          {
+            price: { id: "price_123", recurring: { usage_type: "licensed" } },
+            current_period_start: newStart,
+            // current_period_end intentionally omitted -- must not null
+            // out the existing value.
+          },
+        ],
+      });
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).toEqual(new Date("2029-12-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodEnd).toEqual(existingEnd);
+    });
+
+    it("updates both period fields when a newer event supplies valid values for an existing subscription", async () => {
+      const { service, repos } = buildService();
+      const org = await repos.organizations.create({ name: "Acme", slug: `acme-${randomUUID()}` });
+      const subscriptionId = `sub_${randomUUID()}`;
+      await repos.organizationSubscriptions.upsert({
+        organizationId: org.id,
+        stripeSubscriptionId: subscriptionId,
+        status: "incomplete",
+        currentPeriodStart: new Date("2030-01-01T00:00:00.000Z"),
+        currentPeriodEnd: new Date("2030-02-01T00:00:00.000Z"),
+      });
+
+      const newStart = Math.floor(new Date("2030-02-01T00:00:00.000Z").getTime() / 1000);
+      const newEnd = Math.floor(new Date("2030-03-01T00:00:00.000Z").getTime() / 1000);
+      const event = makeEvent({
+        subscriptionId,
+        status: "active",
+        created: Math.floor(Date.now() / 1000) + 100,
+        items: [
+          {
+            price: { id: "price_123", recurring: { usage_type: "licensed" } },
+            current_period_start: newStart,
+            current_period_end: newEnd,
+          },
+        ],
+      });
+      await service.processEvent(event);
+
+      const sub = await repos.organizationSubscriptions.findByOrganizationId(org.id);
+      expect(sub?.currentPeriodStart).toEqual(new Date("2030-02-01T00:00:00.000Z"));
+      expect(sub?.currentPeriodEnd).toEqual(new Date("2030-03-01T00:00:00.000Z"));
     });
   });
 

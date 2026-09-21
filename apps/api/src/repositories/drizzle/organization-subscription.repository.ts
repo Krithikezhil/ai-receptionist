@@ -18,6 +18,7 @@ function toDomain(
     plan: row.plan,
     status: row.status,
     currentPeriodEnd: row.currentPeriodEnd,
+    currentPeriodStart: row.currentPeriodStart,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -66,6 +67,7 @@ export function createDrizzleOrganizationSubscriptionRepository(
             plan: subscription.plan ?? null,
             status: subscription.status ?? null,
             currentPeriodEnd: subscription.currentPeriodEnd ?? null,
+            currentPeriodStart: subscription.currentPeriodStart ?? null,
             updatedAt: new Date(),
           },
         })

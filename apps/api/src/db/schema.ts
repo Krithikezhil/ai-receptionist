@@ -625,6 +625,7 @@ export const organizationSubscriptions = pgTable("organization_subscriptions", {
     enum: ["active", "past_due", "canceled", "incomplete", "paused"],
   }),
   currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+  currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

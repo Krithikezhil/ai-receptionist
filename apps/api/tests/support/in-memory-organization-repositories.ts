@@ -946,6 +946,7 @@ export function createInMemoryOrganizationSubscriptionRepository(): Organization
         plan: newSubscription.plan ?? null,
         status: newSubscription.status ?? null,
         currentPeriodEnd: newSubscription.currentPeriodEnd ?? null,
+        currentPeriodStart: newSubscription.currentPeriodStart ?? null,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };
