@@ -127,3 +127,53 @@ describe("organization subscription status tenant isolation", () => {
     expect(crossRes.status).toBe(404);
   });
 });
+
+describe("POST /organizations/:organizationId/subscription/stripe-customer (M13 Step 5)", () => {
+  let ctx: Ctx;
+  let ownerAgent: ReturnType<typeof request.agent>;
+  let orgId: string;
+
+  beforeEach(async () => {
+    ctx = buildTestApp();
+    const owner = await registerAgent(ctx, "owner@example.com");
+    ownerAgent = owner.agent;
+    const created = await createOrg(ownerAgent, "Acme Dental");
+    orgId = created.organization.id;
+  });
+
+  it("rejects an unauthenticated request before the handler/service runs", async () => {
+    const res = await request(ctx.app).post(`/organizations/${orgId}/subscription/stripe-customer`);
+    expect(res.status).toBe(401);
+    expect(ctx.stripeClient.calls).toHaveLength(0);
+  });
+
+  it("rejects a non-owner member (403) and never calls Stripe", async () => {
+    const member = await registerAgent(ctx, "member@example.com");
+    await ctx.memberships.create({ organizationId: orgId, userId: member.userId, role: "member" });
+
+    const res = await member.agent.post(`/organizations/${orgId}/subscription/stripe-customer`);
+
+    expect(res.status).toBe(403);
+    expect(ctx.stripeClient.calls).toHaveLength(0);
+  });
+
+  it("rejects a user who is not a member of the organization at all (cross-organization access)", async () => {
+    const outsider = await registerAgent(ctx, "outsider@example.com");
+
+    const res = await outsider.agent.post(`/organizations/${orgId}/subscription/stripe-customer`);
+
+    expect(res.status).toBe(404);
+    expect(ctx.stripeClient.calls).toHaveLength(0);
+  });
+
+  it("returns 204 with no Stripe customer id (or any body) on success", async () => {
+    const res = await ownerAgent.post(`/organizations/${orgId}/subscription/stripe-customer`);
+
+    expect(res.status).toBe(204);
+    expect(res.body).toEqual({});
+    expect(res.text).toBe("");
+
+    const stored = await ctx.organizationSubscriptions.findByOrganizationId(orgId);
+    expect(stored?.stripeCustomerId).toBeDefined();
+  });
+});

@@ -130,5 +130,18 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
   // see organization-subscription.service.ts.
   router.get("/:organizationId/subscription", auth, membership, subscription.getStatus);
 
+  // M13 Step 5: owner-only -- enforced inside the controller (same pattern
+  // as phone-numbers/calendar above). The membership middleware only
+  // confirms the authenticated user belongs to :organizationId; it does
+  // not distinguish role, so a caller can never supply organization
+  // identity beyond what requireOrgMembership has already independently
+  // verified.
+  router.post(
+    "/:organizationId/subscription/stripe-customer",
+    auth,
+    membership,
+    subscription.ensureStripeCustomer,
+  );
+
   return router;
 }

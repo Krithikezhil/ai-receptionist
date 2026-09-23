@@ -39,6 +39,7 @@ import {
 } from "./in-memory-organization-repositories.js";
 import { createFakeGoogleCalendarClient } from "./fake-google-calendar-client.js";
 import { createFakeCalendarConnectionService } from "./fake-calendar-connection-service.js";
+import { createFakeStripeClient } from "./fake-stripe-client.js";
 
 /**
  * Builds a full Express app wired to in-memory repositories instead of
@@ -130,8 +131,10 @@ export function buildTestApp() {
     smsNotificationService,
   );
   const callService = createCallService(calls);
+  const stripeClient = createFakeStripeClient();
   const organizationSubscriptionService = createOrganizationSubscriptionService(
     organizationSubscriptions,
+    stripeClient,
   );
 
   const deps: Required<AppDependencies> = {
@@ -157,6 +160,7 @@ export function buildTestApp() {
     smsNotifications,
     smsOptOuts,
     organizationSubscriptionService,
+    stripeClient,
   };
 
   const app = createApp(deps);
@@ -184,5 +188,6 @@ export function buildTestApp() {
     organizationPhoneNumbers,
     smsOptOuts,
     organizationSubscriptions,
+    stripeClient,
   };
 }

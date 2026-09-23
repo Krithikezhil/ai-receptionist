@@ -42,6 +42,8 @@ import {
   createOrganizationSubscriptionService,
   type OrganizationSubscriptionService,
 } from "./services/organization-subscription.service.js";
+import { createStripeClient } from "./services/stripe-client.js";
+import type { StripeClient } from "./services/stripe-client-types.js";
 import {
   createPhoneNumberService,
   type PhoneNumberService,
@@ -88,6 +90,9 @@ export interface AppDependencies {
    * opt-out state). */
   smsOptOuts?: SmsOptOutRepository;
   organizationSubscriptionService?: OrganizationSubscriptionService;
+  /** Injected in tests with a fake (no-network) StripeClient instead of
+   * the real one. */
+  stripeClient?: StripeClient;
 }
 
 export function createApp(deps: AppDependencies = {}): Express {
@@ -190,12 +195,22 @@ export function createApp(deps: AppDependencies = {}): Express {
   // other service composed in, unlike appointmentService/leadService
   // above (no SMS/calendar side effect exists for a call record).
   const callService = deps.callService ?? createCallService(repos.calls);
-  // M13 Step 3: constructed directly from the repository bundle, same
-  // pattern as callService above -- read-only, no other service composed
-  // in, no Stripe/network call.
+  // M13 Step 5: reads STRIPE_SECRET_KEY directly from process.env, here at
+  // its own construction point -- matching STRIPE_WEBHOOK_SECRET's
+  // established optional-per-deployment-integration convention (no
+  // central env.ts entry; see stripe-webhook.controller.ts's
+  // loadStripeWebhookSecret()). Constructed unconditionally, even when
+  // unset, so an unconfigured deployment never fails to boot over this
+  // optional integration -- createStripeClient()'s createCustomer() fails
+  // closed itself (never an unauthenticated request) if the key is
+  // missing when actually called.
+  const stripeClient = deps.stripeClient ?? createStripeClient(process.env.STRIPE_SECRET_KEY);
+  // M13 Step 3/5: constructed directly from the repository bundle, same
+  // pattern as callService above -- no other service composed in beyond
+  // the injected StripeClient.
   const organizationSubscriptionService =
     deps.organizationSubscriptionService ??
-    createOrganizationSubscriptionService(repos.organizationSubscriptions);
+    createOrganizationSubscriptionService(repos.organizationSubscriptions, stripeClient);
 
   const app = express();
 
