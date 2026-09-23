@@ -143,5 +143,15 @@ export function createOrganizationsRouter(deps: OrganizationRouterDeps): Router 
     subscription.ensureStripeCustomer,
   );
 
+  // M13 Step 6: owner-only, same pattern as the Step 5 route immediately
+  // above. createCheckoutSession() calls ensureStripeCustomer() itself, so
+  // the frontend never needs to call the Step 5 endpoint separately first.
+  router.post(
+    "/:organizationId/subscription/checkout-session",
+    auth,
+    membership,
+    subscription.createCheckoutSession,
+  );
+
   return router;
 }

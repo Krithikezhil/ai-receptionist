@@ -169,4 +169,194 @@ describe("createStripeClient", () => {
     ).rejects.toBeInstanceOf(StripeApiError);
     expect(global.fetch).not.toHaveBeenCalled();
   });
+
+  describe("createCheckoutSession", () => {
+    const params = {
+      customerId: "cus_123",
+      successUrl: "https://example.com/success",
+      cancelUrl: "https://example.com/cancel",
+      setupPriceId: "price_setup",
+      licensedPriceId: "price_licensed",
+      meteredPriceId: "price_metered",
+    };
+
+    it("POSTs to /v1/checkout/sessions", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(url).toBe("https://api.stripe.com/v1/checkout/sessions");
+      expect(init.method).toBe("POST");
+    });
+
+    it("constructs HTTP Basic authentication from the secret key", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe(
+        `Basic ${Buffer.from("sk_test_123:").toString("base64")}`,
+      );
+    });
+
+    it("sends mode=subscription and the ensured customer id", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const body = new URLSearchParams(init.body as string);
+      expect(body.get("mode")).toBe("subscription");
+      expect(body.get("customer")).toBe("cus_123");
+    });
+
+    it("sends the setup Price with quantity=1", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const body = new URLSearchParams(init.body as string);
+      expect(body.get("line_items[0][price]")).toBe("price_setup");
+      expect(body.get("line_items[0][quantity]")).toBe("1");
+    });
+
+    it("sends the licensed Price with quantity=1", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const body = new URLSearchParams(init.body as string);
+      expect(body.get("line_items[1][price]")).toBe("price_licensed");
+      expect(body.get("line_items[1][quantity]")).toBe("1");
+    });
+
+    it("sends the metered Price with NO quantity parameter", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const body = new URLSearchParams(init.body as string);
+      expect(body.get("line_items[2][price]")).toBe("price_metered");
+      expect(body.has("line_items[2][quantity]")).toBe(false);
+    });
+
+    it("sends success_url and cancel_url", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-1");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const body = new URLSearchParams(init.body as string);
+      expect(body.get("success_url")).toBe("https://example.com/success");
+      expect(body.get("cancel_url")).toBe("https://example.com/cancel");
+    });
+
+    it("passes the exact, request-specific Idempotency-Key header through", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/x" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await client.createCheckoutSession(params, "checkout:req-specific-abc");
+
+      const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      const headers = init.headers as Record<string, string>;
+      expect(headers["Idempotency-Key"]).toBe("checkout:req-specific-abc");
+    });
+
+    it("accepts a valid { url: string } response", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ url: "https://checkout.stripe.com/valid" }) });
+      const client = createStripeClient("sk_test_123");
+
+      const result = await client.createCheckoutSession(params, "checkout:req-1");
+
+      expect(result).toEqual({ url: "https://checkout.stripe.com/valid" });
+    });
+
+    it("translates a network error into StripeApiError", async () => {
+      (global.fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("network down"));
+      const client = createStripeClient("sk_test_123");
+
+      await expect(client.createCheckoutSession(params, "checkout:req-1")).rejects.toBeInstanceOf(
+        StripeApiError,
+      );
+    });
+
+    it("translates a non-2xx response into StripeApiError", async () => {
+      mockFetchOnce({ ok: false, status: 402, json: async () => ({ error: { message: "nope" } }) });
+      const client = createStripeClient("sk_test_123");
+
+      await expect(client.createCheckoutSession(params, "checkout:req-1")).rejects.toBeInstanceOf(
+        StripeApiError,
+      );
+    });
+
+    it("rejects invalid JSON", async () => {
+      mockFetchOnce({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("invalid JSON");
+        },
+      });
+      const client = createStripeClient("sk_test_123");
+
+      await expect(client.createCheckoutSession(params, "checkout:req-1")).rejects.toBeInstanceOf(
+        StripeApiError,
+      );
+    });
+
+    it("rejects a malformed response shape (missing url)", async () => {
+      mockFetchOnce({ ok: true, status: 200, json: async () => ({ object: "checkout.session" }) });
+      const client = createStripeClient("sk_test_123");
+
+      await expect(client.createCheckoutSession(params, "checkout:req-1")).rejects.toBeInstanceOf(
+        StripeApiError,
+      );
+    });
+
+    it("fails closed without calling fetch when the secret key is missing", async () => {
+      const client = createStripeClient(undefined);
+
+      await expect(client.createCheckoutSession(params, "checkout:req-1")).rejects.toBeInstanceOf(
+        StripeApiError,
+      );
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
 });

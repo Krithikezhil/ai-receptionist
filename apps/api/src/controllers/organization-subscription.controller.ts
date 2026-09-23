@@ -19,6 +19,13 @@ import type { OrganizationSubscriptionService } from "../services/organization-s
  * (including a missing STRIPE_SECRET_KEY, surfaced by the Stripe client as
  * a thrown StripeApiError) propagates to the app's centralized error
  * handler, which already never leaks internal error detail to the client.
+ *
+ * M13 Step 6: POST /organizations/:organizationId/subscription/checkout-session
+ * is owner-gated the same way, and returns only `{ url }` -- the Checkout
+ * URL to redirect the browser to. Never returns the Stripe customer id,
+ * Checkout Session id, subscription id, price ids, or any raw Stripe
+ * response data. Missing Price-ID/redirect-URL configuration surfaces as a
+ * StripeApiError, same centralized-error-handling treatment as above.
  */
 export function createOrganizationSubscriptionController(
   subscriptionService: OrganizationSubscriptionService,
@@ -44,6 +51,15 @@ export function createOrganizationSubscriptionController(
 
       await subscriptionService.ensureStripeCustomer(req.params.organizationId as string);
       res.status(204).send();
+    },
+
+    async createCheckoutSession(req: Request, res: Response): Promise<void> {
+      if (!requireOwner(req, res)) return;
+
+      const url = await subscriptionService.createCheckoutSession(
+        req.params.organizationId as string,
+      );
+      res.status(200).json({ url });
     },
   };
 }

@@ -30,6 +30,26 @@ export interface CreateStripeCustomerParams {
   organizationId: string;
 }
 
+/**
+ * The only Checkout Session field this codebase ever trusts or returns --
+ * see organization-subscription.service.ts's createCheckoutSession(). The
+ * Checkout Session id, its payment/subscription details, and every other
+ * field Stripe's API returns are deliberately never read or persisted (the
+ * approved Step 6 design keeps no local Checkout Session record at all).
+ */
+export interface StripeCheckoutSession {
+  url: string;
+}
+
+export interface CreateCheckoutSessionParams {
+  customerId: string;
+  successUrl: string;
+  cancelUrl: string;
+  setupPriceId: string;
+  licensedPriceId: string;
+  meteredPriceId: string;
+}
+
 export interface StripeClient {
   /**
    * POST /v1/customers, tagged with organization metadata. `idempotencyKey`
@@ -41,4 +61,19 @@ export interface StripeClient {
     params: CreateStripeCustomerParams,
     idempotencyKey: string,
   ): Promise<StripeCustomer>;
+
+  /**
+   * POST /v1/checkout/sessions, mode=subscription, three line items (setup
+   * one-time + licensed recurring, both quantity 1; metered overage with
+   * no quantity field at all -- Stripe rejects an explicit quantity on a
+   * metered Price's line item). `idempotencyKey` is computed fresh by the
+   * caller for each individual checkout attempt (see
+   * organization-subscription.service.ts) -- unlike createCustomer's
+   * stable per-organization key, a Checkout Session is a new short-lived
+   * attempt each time, not a durable per-organization resource.
+   */
+  createCheckoutSession(
+    params: CreateCheckoutSessionParams,
+    idempotencyKey: string,
+  ): Promise<StripeCheckoutSession>;
 }

@@ -1,5 +1,5 @@
 import request from "supertest";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildTestApp } from "./support/build-test-app.js";
 import { createOrg, registerAgent, type TestAppContext } from "./support/http-helpers.js";
 
@@ -172,6 +172,85 @@ describe("POST /organizations/:organizationId/subscription/stripe-customer (M13 
     expect(res.status).toBe(204);
     expect(res.body).toEqual({});
     expect(res.text).toBe("");
+
+    const stored = await ctx.organizationSubscriptions.findByOrganizationId(orgId);
+    expect(stored?.stripeCustomerId).toBeDefined();
+  });
+});
+
+describe("POST /organizations/:organizationId/subscription/checkout-session (M13 Step 6)", () => {
+  let ctx: Ctx;
+  let ownerAgent: ReturnType<typeof request.agent>;
+  let orgId: string;
+  const ENV_KEYS = [
+    "STRIPE_SETUP_PRICE_ID",
+    "STRIPE_LICENSED_PRICE_ID",
+    "STRIPE_METERED_PRICE_ID",
+    "STRIPE_CHECKOUT_SUCCESS_URL",
+    "STRIPE_CHECKOUT_CANCEL_URL",
+  ] as const;
+  const originalEnv: Record<string, string | undefined> = {};
+
+  beforeEach(async () => {
+    for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
+    process.env.STRIPE_SETUP_PRICE_ID = "price_setup";
+    process.env.STRIPE_LICENSED_PRICE_ID = "price_licensed";
+    process.env.STRIPE_METERED_PRICE_ID = "price_metered";
+    process.env.STRIPE_CHECKOUT_SUCCESS_URL = "https://example.com/success";
+    process.env.STRIPE_CHECKOUT_CANCEL_URL = "https://example.com/cancel";
+
+    ctx = buildTestApp();
+    const owner = await registerAgent(ctx, "owner2@example.com");
+    ownerAgent = owner.agent;
+    const created = await createOrg(ownerAgent, "Acme Veterinary");
+    orgId = created.organization.id;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (originalEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+  });
+
+  it("rejects an unauthenticated request before the handler/service runs", async () => {
+    const res = await request(ctx.app).post(`/organizations/${orgId}/subscription/checkout-session`);
+    expect(res.status).toBe(401);
+    expect(ctx.stripeClient.calls).toHaveLength(0);
+  });
+
+  it("rejects a non-owner member (403) and never calls Stripe", async () => {
+    const member = await registerAgent(ctx, "member2@example.com");
+    await ctx.memberships.create({ organizationId: orgId, userId: member.userId, role: "member" });
+
+    const res = await member.agent.post(`/organizations/${orgId}/subscription/checkout-session`);
+
+    expect(res.status).toBe(403);
+    expect(ctx.stripeClient.calls).toHaveLength(0);
+  });
+
+  it("rejects a user who is not a member of the organization at all (cross-organization access)", async () => {
+    const outsider = await registerAgent(ctx, "outsider2@example.com");
+
+    const res = await outsider.agent.post(`/organizations/${orgId}/subscription/checkout-session`);
+
+    expect(res.status).toBe(404);
+    expect(ctx.stripeClient.calls).toHaveLength(0);
+  });
+
+  it("returns only the Checkout URL on success, with no Stripe identifiers in the response", async () => {
+    ctx.stripeClient.nextCheckoutUrl = "https://checkout.stripe.com/fake-session-xyz";
+
+    const res = await ownerAgent.post(`/organizations/${orgId}/subscription/checkout-session`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ url: "https://checkout.stripe.com/fake-session-xyz" });
+    const keys = Object.keys(res.body);
+    expect(keys).toEqual(["url"]);
+  });
+
+  it("ensures a Stripe customer as part of the same request when none exists yet", async () => {
+    await ownerAgent.post(`/organizations/${orgId}/subscription/checkout-session`);
 
     const stored = await ctx.organizationSubscriptions.findByOrganizationId(orgId);
     expect(stored?.stripeCustomerId).toBeDefined();

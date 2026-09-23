@@ -1,15 +1,16 @@
 import type {
+  CreateCheckoutSessionParams,
   CreateStripeCustomerParams,
+  StripeCheckoutSession,
   StripeClient,
   StripeCustomer,
 } from "../../src/services/stripe-client-types.js";
 import { StripeApiError } from "../../src/services/stripe-client-types.js";
 
 /** One recorded call, in order. */
-export interface FakeStripeClientCall {
-  params: CreateStripeCustomerParams;
-  idempotencyKey: string;
-}
+export type FakeStripeClientCall =
+  | { method: "createCustomer"; params: CreateStripeCustomerParams; idempotencyKey: string }
+  | { method: "createCheckoutSession"; params: CreateCheckoutSessionParams; idempotencyKey: string };
 
 /**
  * Test-only double for StripeClient. Mirrors
@@ -32,18 +33,29 @@ export interface FakeStripeClient extends StripeClient {
    * supplying its own id. Once set, stays fixed for every subsequent
    * successful call until changed again (not a one-shot value). */
   nextCustomerId: string | undefined;
+
+  /** When true, createCheckoutSession throws StripeApiError instead of
+   * succeeding. */
+  failCreateCheckoutSession: boolean;
+
+  /** The Checkout URL createCheckoutSession returns on success. Same
+   * deterministic-incrementing-unless-set convention as nextCustomerId. */
+  nextCheckoutUrl: string | undefined;
 }
 
 export function createFakeStripeClient(): FakeStripeClient {
   let customerCounter = 0;
+  let checkoutCounter = 0;
 
   const fake: FakeStripeClient = {
     calls: [],
     failCreateCustomer: false,
     nextCustomerId: undefined,
+    failCreateCheckoutSession: false,
+    nextCheckoutUrl: undefined,
 
     async createCustomer(params: CreateStripeCustomerParams, idempotencyKey: string) {
-      fake.calls.push({ params, idempotencyKey });
+      fake.calls.push({ method: "createCustomer", params, idempotencyKey });
       if (fake.failCreateCustomer) {
         throw new StripeApiError("Fake Stripe: createCustomer configured to fail.");
       }
@@ -51,6 +63,17 @@ export function createFakeStripeClient(): FakeStripeClient {
       const id = fake.nextCustomerId ?? `fake-cus-${customerCounter}`;
       const customer: StripeCustomer = { id };
       return customer;
+    },
+
+    async createCheckoutSession(params: CreateCheckoutSessionParams, idempotencyKey: string) {
+      fake.calls.push({ method: "createCheckoutSession", params, idempotencyKey });
+      if (fake.failCreateCheckoutSession) {
+        throw new StripeApiError("Fake Stripe: createCheckoutSession configured to fail.");
+      }
+      checkoutCounter += 1;
+      const url = fake.nextCheckoutUrl ?? `https://checkout.stripe.com/fake-session-${checkoutCounter}`;
+      const session: StripeCheckoutSession = { url };
+      return session;
     },
   };
 

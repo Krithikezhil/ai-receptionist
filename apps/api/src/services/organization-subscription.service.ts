@@ -1,8 +1,60 @@
+import { randomUUID } from "node:crypto";
 import type {
   OrganizationSubscriptionRepository,
   OrganizationSubscriptionStatus,
 } from "../repositories/organization-subscription-types.js";
-import type { StripeClient } from "./stripe-client-types.js";
+import { StripeApiError, type StripeClient } from "./stripe-client-types.js";
+
+/**
+ * M13 Step 6: the three non-secret Stripe Price IDs for the approved
+ * commercial model (one-time setup, recurring licensed plan, metered
+ * overage). Read directly from process.env at the point they're needed --
+ * matching STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET's existing
+ * optional-per-deployment Stripe-integration convention (see
+ * stripe-client.ts / stripe-webhook.controller.ts's loadStripeWebhookSecret()),
+ * not env.ts's central object -- keeping all Stripe-specific configuration
+ * in one consistent place rather than splitting it across two mechanisms.
+ * None of these are secrets; they are never sent to the browser regardless
+ * (this file is server-only), and Products/Prices are never created by
+ * application code -- these ids reference Prices configured outside the
+ * repository (Stripe Dashboard/API), per the approved Step 6 design.
+ */
+function loadStripePriceIds(): {
+  setupPriceId: string;
+  licensedPriceId: string;
+  meteredPriceId: string;
+} {
+  const setupPriceId = process.env.STRIPE_SETUP_PRICE_ID;
+  const licensedPriceId = process.env.STRIPE_LICENSED_PRICE_ID;
+  const meteredPriceId = process.env.STRIPE_METERED_PRICE_ID;
+  if (!setupPriceId || !licensedPriceId || !meteredPriceId) {
+    throw new StripeApiError(
+      "Stripe Checkout is not configured: STRIPE_SETUP_PRICE_ID, STRIPE_LICENSED_PRICE_ID, " +
+        "and STRIPE_METERED_PRICE_ID must all be set.",
+    );
+  }
+  return { setupPriceId, licensedPriceId, meteredPriceId };
+}
+
+/**
+ * M13 Step 6: full, deployment-configured Checkout redirect URLs --
+ * mirrors GOOGLE_OAUTH_REDIRECT_URI's existing precedent (a complete URL
+ * supplied by configuration, never synthesized here from env.corsOrigin +
+ * an assumed path) so this code never has to guess at a Step 9 billing-UI
+ * route that doesn't exist yet. Read at point of use, same reasoning as
+ * loadStripePriceIds() above.
+ */
+function loadStripeCheckoutRedirectUrls(): { successUrl: string; cancelUrl: string } {
+  const successUrl = process.env.STRIPE_CHECKOUT_SUCCESS_URL;
+  const cancelUrl = process.env.STRIPE_CHECKOUT_CANCEL_URL;
+  if (!successUrl || !cancelUrl) {
+    throw new StripeApiError(
+      "Stripe Checkout is not configured: STRIPE_CHECKOUT_SUCCESS_URL and " +
+        "STRIPE_CHECKOUT_CANCEL_URL must both be set.",
+    );
+  }
+  return { successUrl, cancelUrl };
+}
 
 /**
  * M13 Step 3: the public, dashboard-facing view of an organization's local
@@ -36,13 +88,26 @@ export interface OrganizationSubscriptionService {
    * convention.
    */
   ensureStripeCustomer(organizationId: string): Promise<void>;
+
+  /**
+   * M13 Step 6: ensures a Stripe customer exists (calling
+   * ensureStripeCustomer itself -- callers never need to invoke that
+   * endpoint separately first), then creates a fresh Stripe Checkout
+   * Session for the approved commercial model's three line items and
+   * returns only the Checkout URL. Every invocation is a new, short-lived
+   * checkout attempt -- unlike ensureStripeCustomer's stable per-organization
+   * idempotency key, this uses a fresh, request-specific Idempotency-Key
+   * for every call (see the inline comment below) and never persists the
+   * Checkout Session or its key locally.
+   */
+  createCheckoutSession(organizationId: string): Promise<string>;
 }
 
 export function createOrganizationSubscriptionService(
   repo: OrganizationSubscriptionRepository,
   stripeClient: StripeClient,
 ): OrganizationSubscriptionService {
-  return {
+  const service: OrganizationSubscriptionService = {
     async getStatus(organizationId) {
       const subscription = await repo.findByOrganizationId(organizationId);
       if (!subscription) {
@@ -87,5 +152,42 @@ export function createOrganizationSubscriptionService(
         await repo.upsert({ organizationId, stripeCustomerId: customer.id });
       }
     },
+
+    async createCheckoutSession(organizationId) {
+      await service.ensureStripeCustomer(organizationId);
+
+      const subscription = await repo.findByOrganizationId(organizationId);
+      const stripeCustomerId = subscription?.stripeCustomerId;
+      if (!stripeCustomerId) {
+        // Should be unreachable if ensureStripeCustomer succeeded -- fail
+        // closed rather than send an undefined customer to Stripe.
+        throw new StripeApiError("Stripe customer could not be resolved.");
+      }
+
+      const { setupPriceId, licensedPriceId, meteredPriceId } = loadStripePriceIds();
+      const { successUrl, cancelUrl } = loadStripeCheckoutRedirectUrls();
+
+      // Fresh per invocation, never reused or persisted -- a Checkout
+      // Session is a new short-lived attempt each time, not a durable
+      // per-organization resource like the Stripe customer itself (see
+      // ensureStripeCustomer's stable create-customer:{organizationId}
+      // key above, which this deliberately does NOT mirror).
+      const idempotencyKey = `checkout:${randomUUID()}`;
+
+      const session = await stripeClient.createCheckoutSession(
+        {
+          customerId: stripeCustomerId,
+          successUrl,
+          cancelUrl,
+          setupPriceId,
+          licensedPriceId,
+          meteredPriceId,
+        },
+        idempotencyKey,
+      );
+
+      return session.url;
+    },
   };
+  return service;
 }

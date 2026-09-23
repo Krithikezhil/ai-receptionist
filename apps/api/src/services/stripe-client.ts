@@ -1,11 +1,14 @@
 import type {
+  CreateCheckoutSessionParams,
   CreateStripeCustomerParams,
+  StripeCheckoutSession,
   StripeClient,
   StripeCustomer,
 } from "./stripe-client-types.js";
 import { StripeApiError } from "./stripe-client-types.js";
 
 const STRIPE_CUSTOMERS_URL = "https://api.stripe.com/v1/customers";
+const STRIPE_CHECKOUT_SESSIONS_URL = "https://api.stripe.com/v1/checkout/sessions";
 
 function isStripeCustomerResponse(body: unknown): body is StripeCustomer {
   return (
@@ -13,6 +16,15 @@ function isStripeCustomerResponse(body: unknown): body is StripeCustomer {
     body !== null &&
     typeof (body as StripeCustomer).id === "string" &&
     (body as StripeCustomer).id.length > 0
+  );
+}
+
+function isStripeCheckoutSessionResponse(body: unknown): body is StripeCheckoutSession {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    typeof (body as StripeCheckoutSession).url === "string" &&
+    (body as StripeCheckoutSession).url.length > 0
   );
 }
 
@@ -81,6 +93,59 @@ export function createStripeClient(secretKey: string | undefined): StripeClient 
       }
 
       return { id: responseBody.id };
+    },
+
+    async createCheckoutSession(params: CreateCheckoutSessionParams, idempotencyKey: string) {
+      if (!secretKey) {
+        throw new StripeApiError("Stripe is not configured.");
+      }
+
+      const body = new URLSearchParams();
+      body.set("mode", "subscription");
+      body.set("customer", params.customerId);
+      body.set("success_url", params.successUrl);
+      body.set("cancel_url", params.cancelUrl);
+      body.set("line_items[0][price]", params.setupPriceId);
+      body.set("line_items[0][quantity]", "1");
+      body.set("line_items[1][price]", params.licensedPriceId);
+      body.set("line_items[1][quantity]", "1");
+      body.set("line_items[2][price]", params.meteredPriceId);
+      // Deliberately no line_items[2][quantity] -- Stripe rejects an
+      // explicit quantity on a metered Price's line item.
+
+      let response: Response;
+      try {
+        response = await fetch(STRIPE_CHECKOUT_SESSIONS_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${secretKey}:`).toString("base64")}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: body.toString(),
+        });
+      } catch {
+        throw new StripeApiError("Stripe Checkout Session creation request failed.");
+      }
+
+      if (!response.ok) {
+        throw new StripeApiError(
+          `Stripe Checkout Session creation failed with status ${response.status}.`,
+        );
+      }
+
+      let responseBody: unknown;
+      try {
+        responseBody = await response.json();
+      } catch {
+        throw new StripeApiError("Stripe Checkout Session creation response was not valid JSON.");
+      }
+
+      if (!isStripeCheckoutSessionResponse(responseBody)) {
+        throw new StripeApiError("Stripe Checkout Session creation response was malformed.");
+      }
+
+      return { url: responseBody.url };
     },
   };
 }
