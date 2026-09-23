@@ -4,6 +4,7 @@ import { createDrizzleBusinessHoursRepository } from "./drizzle/business-hours.r
 import { createDrizzleBusinessProfileRepository } from "./drizzle/business-profile.repository.js";
 import { createDrizzleOrganizationCalendarConnectionRepository } from "./drizzle/calendar-connection.repository.js";
 import { createDrizzleCallRepository } from "./drizzle/call.repository.js";
+import { createDrizzleCallUsageReportRepository } from "./drizzle/call-usage-report.repository.js";
 import { createDrizzleKnowledgeChunkRepository } from "./drizzle/knowledge-chunk.repository.js";
 import { createDrizzleKnowledgeRepository } from "./drizzle/knowledge.repository.js";
 import { createDrizzleLeadRepository } from "./drizzle/lead.repository.js";
@@ -23,6 +24,7 @@ import { createDrizzleUserRepository } from "./drizzle/user.repository.js";
 import type { AppointmentRepository } from "./appointment-types.js";
 import type { OrganizationCalendarConnectionRepository } from "./calendar-connection-types.js";
 import type { CallRepository } from "./call-types.js";
+import type { CallUsageReportRepository } from "./call-usage-report-types.js";
 import type { KnowledgeChunkRepository } from "./knowledge-chunk-types.js";
 import type { KnowledgeRepository } from "./knowledge-types.js";
 import type { LeadRepository } from "./lead-types.js";
@@ -61,6 +63,7 @@ export interface Repositories {
   appointments: AppointmentRepository;
   organizationCalendarConnections: OrganizationCalendarConnectionRepository;
   calls: CallRepository;
+  callUsageReports: CallUsageReportRepository;
   smsNotifications: SmsNotificationRepository;
   smsOptOuts: SmsOptOutRepository;
   stripeWebhookEvents: StripeWebhookEventRepository;
@@ -87,6 +90,7 @@ export function createRepositories(): Repositories {
     appointments: createDrizzleAppointmentRepository(db),
     organizationCalendarConnections: createDrizzleOrganizationCalendarConnectionRepository(db),
     calls: createDrizzleCallRepository(db),
+    callUsageReports: createDrizzleCallUsageReportRepository(db),
     smsNotifications: createDrizzleSmsNotificationRepository(db),
     smsOptOuts: createDrizzleSmsOptOutRepository(db),
     stripeWebhookEvents: createDrizzleStripeWebhookEventRepository(db),
@@ -113,6 +117,7 @@ export type { AppointmentRepository } from "./appointment-types.js";
 export type { OrganizationCalendarConnectionRepository } from "./calendar-connection-types.js";
 export type { SmsNotificationRepository } from "./sms-notification-types.js";
 export type { CallRepository } from "./call-types.js";
+export type { CallUsageReportRepository } from "./call-usage-report-types.js";
 export type { SmsOptOutRepository } from "./sms-opt-out-types.js";
 export type { StripeWebhookEventRepository } from "./stripe-webhook-event-types.js";
 export type { UnitOfWork } from "./unit-of-work.js";

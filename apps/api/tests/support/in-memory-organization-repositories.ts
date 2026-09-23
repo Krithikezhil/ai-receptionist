@@ -24,6 +24,12 @@ import type {
 } from "../../src/repositories/knowledge-types.js";
 import type { Lead, LeadRepository, NewLead } from "../../src/repositories/lead-types.js";
 import type {
+  CallUsageReport,
+  CallUsageReportRepository,
+  CallUsageReportUpdate,
+  NewCallUsageReport,
+} from "../../src/repositories/call-usage-report-types.js";
+import type {
   NewOrganizationSubscription,
   OrganizationSubscription,
   OrganizationSubscriptionRepository,
@@ -1003,6 +1009,55 @@ export function createInMemoryStripeWebhookEventRepository(): StripeWebhookEvent
       const existing = events.get(eventId);
       if (!existing) return;
       events.set(eventId, { ...existing, applied: true, organizationId });
+    },
+  };
+}
+
+/**
+ * M13: in-memory double for the durable local usage-reporting ledger.
+ * Keyed by callId (the same field the real table's unique constraint
+ * dedupes on) -- mirrors createInMemoryStripeWebhookEventRepository's
+ * "the Map key IS the dedupe key" shape exactly. Does NOT model the real
+ * table's ON DELETE CASCADE from calls -- that guarantee is the
+ * database's, not this double's, to provide (same precedent already
+ * documented on createInMemoryKnowledgeChunkRepository above).
+ */
+export function createInMemoryCallUsageReportRepository(): CallUsageReportRepository {
+  const reports = new Map<string, CallUsageReport>();
+
+  return {
+    async insertIfAbsent(report: NewCallUsageReport) {
+      if (reports.has(report.callId)) return undefined;
+      const created: CallUsageReport = {
+        id: randomUUID(),
+        callId: report.callId,
+        organizationId: report.organizationId,
+        billableMinutes: null,
+        meterEventIdentifier: null,
+        reportedAt: null,
+        createdAt: new Date(),
+      };
+      reports.set(report.callId, created);
+      return created;
+    },
+
+    async findByCallIdAndOrganizationId(callId, organizationId) {
+      const found = reports.get(callId);
+      return found && found.organizationId === organizationId ? found : undefined;
+    },
+
+    async update(callId, organizationId, changes: CallUsageReportUpdate) {
+      const existing = reports.get(callId);
+      if (!existing || existing.organizationId !== organizationId) return undefined;
+      const updated = { ...existing, ...changes };
+      reports.set(callId, updated);
+      return updated;
+    },
+
+    async listUnreportedByOrganizationId(organizationId) {
+      return [...reports.values()].filter(
+        (r) => r.organizationId === organizationId && r.reportedAt === null,
+      );
     },
   };
 }

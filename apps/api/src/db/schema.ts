@@ -684,3 +684,56 @@ export const stripeWebhookEvents = pgTable(
 
 export type StripeWebhookEventRow = typeof stripeWebhookEvents.$inferSelect;
 export type NewStripeWebhookEventRow = typeof stripeWebhookEvents.$inferInsert;
+
+/**
+ * M13: durable local idempotency/reliability ledger for Stripe usage
+ * (Meter Event) reporting -- one row per billable call. Exists so Stripe's
+ * own meter-event `identifier` deduplication window (documented as "at
+ * least 24 hours", not indefinite) is never the sole guarantee against
+ * double-reporting a call's usage across a full monthly billing cycle.
+ * callId is unique (not the primary key -- id below follows this schema's
+ * dominant synthetic-uuid PK convention, the same one organizations/calls/
+ * businessProfiles/etc. use, rather than the narrower natural-key-as-PK
+ * precedent organizationSubscriptions/stripeWebhookEvents use for their
+ * own documented reasons) so at most one report row can ever exist per
+ * call -- enforced by Postgres via this unique constraint, surfaced by
+ * the repository as an onConflictDoNothing() no-op on a duplicate insert,
+ * mirroring stripeWebhookEvents.insertIfAbsent's exact contract.
+ * organizationId is intentionally denormalized from calls.organization_id
+ * (never resolved only via a join) so tenant-scoped reconciliation/
+ * authorization queries have a direct column to filter on. Postgres
+ * cannot enforce calls.organization_id = call_usage_reports.organization_id
+ * directly without a composite (id, organization_id) key on calls, which
+ * does not exist and is out of scope for this step -- the service layer
+ * that creates these rows MUST copy organizationId from the same calls
+ * row it read callId from; this invariant is documented here, not
+ * database-enforced. billableMinutes/meterEventIdentifier/reportedAt are
+ * all nullable and never given a value at row-creation time -- null means
+ * "not yet computed" / "not yet reported", the same absence-of-data
+ * convention organizationSubscriptions' nullable Stripe-linkage columns
+ * already use. The actual ceil(durationSeconds/60)-with-1-minute-floor
+ * computation, the Stripe Meter Event call, and the worker that drives
+ * this table are deliberately NOT part of this step -- see the approved
+ * M13 plan.
+ */
+export const callUsageReports = pgTable(
+  "call_usage_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    callId: uuid("call_id")
+      .notNull()
+      .unique()
+      .references(() => calls.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    billableMinutes: integer("billable_minutes"),
+    meterEventIdentifier: text("meter_event_identifier"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("call_usage_reports_organization_id_idx").on(t.organizationId)],
+);
+
+export type CallUsageReportRow = typeof callUsageReports.$inferSelect;
+export type NewCallUsageReportRow = typeof callUsageReports.$inferInsert;
