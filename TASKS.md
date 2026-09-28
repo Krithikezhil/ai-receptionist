@@ -1391,6 +1391,118 @@ exist yet instead of inventing it.
       `ARCHITECTURE.md`/`SECURITY.md` updates for any new endpoints or (if resolved) the transcript-
       storage decision from Step 5.
 
+## M13 -- Stripe billing (in progress)
+
+Authoritative M13 step breakdown per the official scope in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): "Subscription plans, metered usage billing,
+Stripe webhook handling, billing UI." Derived by reading the actual current `apps/api` source
+tree and git history rather than assumed -- several backend pieces already exist and are
+committed; several others (anything requiring a live Stripe account/credentials, and all billing
+UI) do not exist yet.
+
+**Confirmed starting state (read-only findings this checklist depends on):**
+- No `stripe` package is a dependency anywhere in this repository (native `fetch` is the approved
+  integration approach, not the Stripe SDK). No `STRIPE_SECRET_KEY` exists in `config/env.ts` or
+  anywhere else -- only `STRIPE_WEBHOOK_SECRET`, read directly via `process.env` at the controller
+  boundary (see `stripe-webhook.controller.ts`), following this codebase's existing two-tier
+  secret convention.
+- No Stripe customer creation, Checkout Session creation, native Billing Meter/Price creation, or
+  Billing Portal session creation code exists anywhere.
+- No service or worker exists that computes billable minutes from `calls` rows or reports usage
+  to Stripe. The durable local ledger for that future work (Step 5 below) exists, but is not yet
+  populated or consumed by anything.
+- No billing UI exists anywhere in `apps/web` (confirmed via directory listing -- no
+  `components/billing`, no `lib/billing.ts` equivalent).
+
+**Step 1: Organization subscription schema and status endpoint**
+- [x] `organization_subscriptions` table (organization-scoped, nullable Stripe linkage fields,
+      lazy row creation) -- commit `4ea0142`.
+- [x] `OrganizationSubscriptionRepository` (Drizzle + in-memory) -- commit `1b8ac6d`.
+- [x] Public `GET /organizations/:id/subscription` status endpoint, deliberately excluding
+      `stripeCustomerId`/`stripeSubscriptionId` from the response -- commit `b346376`.
+
+**Step 2: Stripe webhook signature and raw-body boundary**
+- [x] Native (no SDK) `Stripe-Signature` verification (`t=`/`v1=` HMAC-SHA256, 300s tolerance,
+      timing-safe comparison) and the `express.raw()` route boundary mounted before the global
+      JSON body parser -- commit `89874f4`.
+- [x] `stripe_webhook_events` dedupe/ordering ledger table and repository scaffold -- commit
+      `7ec5c58`.
+
+**Step 3: Stripe subscription lifecycle synchronization**
+- [x] `StripeSubscriptionSyncService`: organization resolution (subscription id / customer id /
+      verified `metadata.organizationId`), event dedupe, stale/out-of-order rejection, status
+      mapping, and the accepted Option C first-row concurrency decision (documented in
+      SECURITY.md, not closed by an advisory lock or extra schema) -- commit `627b94b`.
+- [x] Licensed-vs-metered subscription item resolution (`price.recurring.usage_type`, never
+      positional `items[0]`) so the sync service is compatible with the approved two-item
+      (licensed + metered) subscription shape -- same commit, extended in this session.
+- [x] `currentPeriodStart`/`currentPeriodEnd` synchronized from the resolved licensed item's
+      Stripe billing-period fields, with existing-value preservation when Stripe omits a period
+      field -- commit `b1c9dd5`.
+
+**Step 4: Durable call-usage-report ledger**
+- [x] `call_usage_reports` table (`callId` unique/cascade to `calls.id`, denormalized
+      `organizationId`, nullable `billableMinutes`/`meterEventIdentifier`/`reportedAt`),
+      `CallUsageReportRepository` (Drizzle + in-memory), and focused repository tests -- commit
+      `5cf07aa`.
+- [x] Migration `0016_unique_mimic` generated for this table.
+- [ ] **Migration `0016` has been generated but is NOT applied to any database.** This checklist
+      item does not claim the table exists in a running database, only that the schema/migration
+      source is committed.
+- [x] This ledger is now populated and consumed: `call.service.ts`'s `recordCall()` computes and
+      persists `billableMinutes` from `calls.startedAt`/`endedAt` at call-record time, and
+      `workers/usage-reporting-worker.ts` reports each unreported row's usage to Stripe via Meter
+      Events, writing `meterEventIdentifier`/`reportedAt` only after Stripe confirms acceptance --
+      both delivered by Step 7 below, which did not exist yet when this line was originally written.
+
+**Step 5: Stripe customer creation and organization association**
+- [x] Server-side Stripe Customer creation (native fetch), idempotent per organization
+      (deterministic `Idempotency-Key` derived from `organizationId`, not a random key), reusing
+      an existing `stripeCustomerId` on `organization_subscriptions` rather than creating a
+      duplicate. Owner-gated, organization id taken only from authenticated server-side context.
+
+**Step 6: Stripe Products/Prices, native Billing Meter, and Checkout flow**
+- [ ] Native Stripe Billing Meter + graduated-tier metered Price (first 10,000 minutes at $0,
+      additional minutes at $0.25) configured outside the repository (Stripe Dashboard/API,
+      referenced here by env-configured Price/meter identifiers, never created by application
+      code at runtime).
+- [x] Checkout Session creation: one-time $1,000 setup Price + $2,500/mo recurring licensed
+      Price + the metered overage Price (no `quantity` on the metered line item, per Stripe's
+      documented requirement), owner-gated.
+
+**Step 7: Usage computation and Meter Event reporting**
+- [x] Service/worker that computes billable minutes per call (existing approved rule: exclude
+      `disposition = "failed"`, `ceil(durationSeconds / 60)`, minimum 1 minute), populates
+      `call_usage_reports.billableMinutes`, and reports each call's usage to Stripe via
+      `POST /v1/billing/meter_events` using the ledger's `callId`-derived idempotency key, then
+      records `meterEventIdentifier`/`reportedAt`. Depends on Steps 4 and 6.
+
+**Step 8: Stripe Billing Portal**
+- [x] Owner-gated endpoint creating a Billing Portal session for the organization's existing
+      Stripe customer (server-resolved `stripeCustomerId`, never client-supplied), returning only
+      the portal URL.
+
+**Step 9: Billing UI (frontend)**
+- [x] `apps/web` billing dashboard view: current plan, monthly price, included/used/remaining
+      minutes for the current Stripe billing period (explicitly distinct from M12's rolling
+      30-day analytics usage metric, never reusing it), subscription status, setup-fee status,
+      and a Billing Portal action -- consuming Steps 1-3's existing status endpoint plus new
+      endpoints from Steps 5-8.
+
+**Step 10: Tenant isolation and authorization review**
+- [x] Dedicated audit step, mirroring M12 Step 11: confirm every new M13 endpoint from Steps 5-8
+      uses the existing `requireAuth` + `requireOrgMembership` + owner-only gate pattern, never
+      accepts a client-supplied organization id, and never returns another organization's Stripe
+      identifiers.
+
+**Step 11: Tests and final verification**
+- [x] Focused tests for every new Steps 5-8 service/endpoint (mocked Stripe HTTP calls, no live
+      network access), following the existing Vitest + in-memory-repository convention.
+- [ ] Full regression: `apps/api` typecheck/lint/test clean. Manual verification checklist:
+      billing flow exercised against Stripe test-mode credentials once those exist (not before).
+      Documentation pass: `TASKS.md` completion status, `ARCHITECTURE.md`/`SECURITY.md` updates
+      for the finalized usage-reporting idempotency design and any new endpoints.
+
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M13 through M15.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M14 through M15.
