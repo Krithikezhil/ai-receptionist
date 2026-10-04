@@ -1001,3 +1001,239 @@ genuine embeddings) has **not** been manually verified in this environment. No p
 result-count cap beyond `DEFAULT_KNOWLEDGE_SEARCH_LIMIT = 5` exists for the underlying
 per-organization chunk scan -- acceptable at today's target scale (§15.1) but not evaluated
 against a much larger knowledge base. See TASKS.md for current per-step status.
+
+## 16. Dashboard Calls, Analytics, and Usage (M12)
+
+M12 adds a calls dashboard, a read-only analytics aggregate, and a rolling usage summary, all
+built directly on organization-scoped data already produced by earlier milestones -- no new
+external system, no billing/metering infrastructure (that is M13's stated scope), and no change to
+any voice-agent transport or pipeline behavior. Full implementation detail and per-step status
+lives in [TASKS.md](TASKS.md); this section covers the design.
+
+### 16.1 Calls data model: metadata and summary only
+
+`calls` (`apps/api/src/db/schema.ts`) is a new, additive table: `organizationId` (FK to
+`organizations.id`, `ON DELETE CASCADE`), `callSid` (the real Twilio CallSid from M7's
+`routes/twilio.py`, never invented), `startedAt`/`endedAt`, a `disposition` enum
+(`completed`/`failed`/`abandoned`) describing how the session itself ended, and a nullable
+`summary` text column added in M12 Step 6. Uniqueness is enforced by a composite
+`(organizationId, callSid)` index -- deliberately organization-scoped, not global, so `callSid` can
+never become a cross-tenant lookup key -- alongside a secondary index on `organizationId` alone.
+One row is written once, at call end; there is no separate start/update path, and `summary` (an
+AI-generated recap from the voice agent's own end-of-call context) is never overwritten after that
+initial write (see the repository's first-write-wins `ON CONFLICT DO NOTHING` handling).
+
+No transcript or recording content exists in this table, or anywhere else in this schema. Per
+TASKS.md's M12 Step 5 tracking, whether to add full verbatim transcript storage was raised as an
+explicit open design decision -- described there as a materially different, more privacy-sensitive
+capability that would need its own dedicated SECURITY.md review (retention, access control,
+redaction) before being built -- and that decision **remains unresolved**. This section documents
+the calls model as it actually exists today: call metadata plus an optional short summary, nothing
+more.
+
+### 16.2 Write path and dashboard read endpoint
+
+The sole write path is internal: `POST /internal/v1/organizations/:organizationId/calls`
+(`internal.controller.ts`'s `recordCall`), gated by the same service-auth pattern as every other
+`/internal/v1/*` route (§8, §10), called once by the voice-agent's `session.py` at call end via a
+new `ApiClient` method -- mirroring the established `create_lead` (M9)/`book_appointment` (M10)
+pattern. No dashboard user ever creates a call record directly.
+
+The dashboard-facing read path is `GET /organizations/:organizationId/calls`
+(`organizations.routes.ts`), list-only -- no create/update/delete on this router, since calls are
+never typed in by a user. It uses the identical `requireAuth` + `requireOrgMembership` chain as
+every other organization-scoped resource in this file (§10), and returns the full
+organization-scoped set unpaginated, matching this codebase's existing precedent for leads,
+appointments, knowledge, and services.
+
+### 16.3 Analytics and usage aggregation
+
+`GET /organizations/:organizationId/analytics` (same auth + membership gate) returns a single,
+fixed-shape `AnalyticsSummary` object directly (no list wrapper, since this is an aggregate, not a
+resource collection): all-time counts of appointments/leads/calls/sms grouped by their own
+status/disposition enum, plus a `usage` section.
+
+`AnalyticsService` (`apps/api/src/services/analytics.service.ts`) computes the all-time groups by
+fetching each organization's full record set through the already-organization-scoped
+`AppointmentService`/`LeadService`/`CallService` (and, for SMS, `SmsNotificationRepository`
+directly, since `SmsNotificationService` is scheduling-only with no read method) and counting in
+memory -- not via SQL `COUNT`/`GROUP BY`, and not a denormalized analytics store. Every dependency
+is already organization-scoped at its own query layer, so this service never fetches cross-tenant
+data and filters afterward.
+
+`usage` is a separate, independently-computed section covering a fixed rolling 30-day window,
+using one shared `since`/`now` instant per request so all three metrics describe exactly the same
+window:
+
+* `callsHandled` -- calls whose `startedAt` falls in the window
+  (`CallRepository.listByOrganizationIdBetween`)
+* `smsSent` -- SMS notification records whose `createdAt` falls in the window, counted regardless
+  of current status, i.e. occurrence-based, not delivery/billing metering
+  (`SmsNotificationRepository.listByOrganizationIdBetween`)
+* `appointmentsBooked` -- appointments whose `createdAt` (the booking action, not the scheduled
+  `startTime`) falls in the window (`AppointmentRepository.listByOrganizationIdBetween`)
+
+Leads are deliberately excluded from usage. Each `*Between()` method is a dedicated repository
+method, not an optional filter on the existing all-time `listByOrganizationId()`, so the
+pre-existing all-time callers are never at risk of an accidental date filter; each query enforces
+both the organization scope and the time window directly in its `WHERE` clause, never a global
+fetch filtered in memory. This usage summary is explicitly a lightweight, read-only display of
+already-derivable data -- it is **not** M13's metered usage billing and introduces no
+billing/metering infrastructure of its own.
+
+### 16.4 What stayed frozen
+
+No change to any voice-agent transport, pipeline, or provider code beyond the new `recordCall`
+API-client method itself. No new external service, no billing/payment integration, no pagination
+added to any existing list endpoint. Transcript storage remains unimplemented and undecided, as
+described in §16.1.
+
+## 17. Stripe Billing: Customer, Checkout, Portal, and Usage Reporting (M13 Steps 5-9)
+
+M13 Steps 5-9 add the four remaining pieces of Stripe billing: server-side Stripe customer creation, a
+Checkout flow for the approved commercial model, a Billing Portal action, a usage-reporting worker
+that reports billable call minutes to Stripe as Meter Events, and a billing dashboard view. Steps 1-4
+(subscription schema, webhook signature/raw-body boundary, subscription lifecycle sync, the
+call-usage-report ledger) are unchanged and documented in TASKS.md's own step breakdown; this section
+covers only what Steps 5-9 add.
+
+### 17.1 Stripe customer, Checkout, and Billing Portal
+
+Authenticated request → `requireAuth` → `requireOrgMembership` → owner-only authorization (for the
+three mutating actions below) → `OrganizationSubscriptionService` → the server-side `StripeClient`
+(native `fetch`, no Stripe SDK) → Stripe's Customer / Checkout Session / Billing Portal Session APIs.
+
+Stripe customer creation is idempotent per organization: a stable `create-customer:{organizationId}`
+Idempotency-Key is sent on every attempt, and the operation no-ops entirely (zero Stripe calls) once
+`organizationSubscriptions.stripeCustomerId` is already persisted for that organization. Checkout
+Session creation calls customer creation first, then creates a session with three line items -- a
+one-time setup fee ($1,000, quantity 1), a recurring licensed component ($2,500/month, quantity 1),
+and the metered overage Price with no client-supplied quantity (Stripe rejects an explicit quantity on
+a metered line) -- using a fresh, request-specific `checkout:{randomUUID()}` Idempotency-Key per
+attempt. Billing Portal session creation never provisions a customer and fails closed if none exists
+yet, using its own fresh `billing-portal:{randomUUID()}` key. Checkout's success/cancel URLs and the
+Billing Portal's return URL are all read from server configuration (`STRIPE_CHECKOUT_SUCCESS_URL`,
+`STRIPE_CHECKOUT_CANCEL_URL`, `STRIPE_BILLING_PORTAL_RETURN_URL`) -- never synthesized from or
+influenced by a client-supplied value.
+
+The native Stripe Billing Meter and its graduated-tier metered Price are externally configured Stripe
+resources (Stripe Dashboard/API). The application references their identifiers via environment
+configuration (`STRIPE_SETUP_PRICE_ID`, `STRIPE_LICENSED_PRICE_ID`, `STRIPE_METERED_PRICE_ID`,
+`STRIPE_METER_EVENT_NAME`) but does not create or manage those resources at runtime.
+
+### 17.2 Usage reporting
+
+`Call` → `computeBillableMinutes()` → `call_usage_reports` → per-organization usage-reporting worker
+→ Stripe Meter Event → persisted reporting state.
+
+A failed call (`disposition === "failed"`) always produces `0` billable minutes; every other call uses
+`ceil(durationSeconds / 60)` with a one-minute floor. This value is computed once, eagerly, at
+call-record time (`call.service.ts`'s `recordCall()`), never recomputed later. The usage-reporting
+worker (`workers/usage-reporting-worker.ts`) reads only per-organization unreported ledger rows via
+`CallUsageReportRepository.listUnreportedByOrganizationId()`, which filters on `reportedAt IS NULL` --
+an already-reported row is therefore excluded from every subsequent poll and is never selected again
+by the worker. It resolves the Stripe customer solely from that ledger row's own `organizationId`.
+Each report is sent with a deterministic, call-derived identifier (`call-usage:{callId}`), reused
+unchanged across retries of the same call as both Stripe's own Meter Event `identifier`
+(deduplication) field and the request's Idempotency-Key header. `meterEventIdentifier`/`reportedAt`
+are persisted on the ledger row only after Stripe confirms acceptance of the report; a call that is
+retried while still unreported (for example after a prior attempt failed) reuses that same
+deterministic identifier on the next attempt, and any failure leaves the row unreported and retryable
+on the next poll.
+
+Billing-period usage shown in the application (`OrganizationSubscriptionService.getStatus()`) is
+aggregated by summing `billableMinutes` for ledger rows whose underlying call's `endedAt` falls within
+the current Stripe billing period -- independent of whether that usage has actually been reported to
+Stripe yet, and independent of `reportedAt`/ledger creation time.
+
+### 17.3 Webhook routing
+
+Extends the existing webhook signature-verification and event-deduplication boundary described in
+SECURITY.md §14 (unchanged). After that boundary, `invoice.*` events are routed to the new
+`StripeSetupFeeSyncService`; every other event type continues to the existing
+`StripeSubscriptionSyncService`, unchanged from Steps 2-3.
+
+Setup-fee state (`organizationSubscriptions.setupFeeStatus`) is nullable, with three possible values:
+`pending`, `paid`, `failed`. `invoice.created` establishes `pending`; `invoice.paid` establishes
+`paid`; `invoice.payment_failed` establishes `failed`. The same invoice can progress from `failed` to
+`paid` after a Stripe-side retry. A different, older invoice (compared by the stored
+`setupFeeInvoiceCreatedAt`) can never overwrite state already established by a newer one, regardless
+of webhook delivery order. An invoice is identified as a setup-fee invoice only when
+`billing_reason === "subscription_create"` **and** at least one line item is priced at the configured
+`STRIPE_SETUP_PRICE_ID`. Synchronization takes a row lock on the organization's subscription row
+(`findByOrganizationIdForUpdate`) before applying any write, and reuses the existing
+`stripe_webhook_events` dedupe ledger unchanged. No refund event type is handled -- refund-driven
+setup-fee transitions are not implemented.
+
+### 17.4 What stayed frozen
+
+Subscription lifecycle synchronization (Steps 2-3) and the webhook signature/raw-body boundary are
+unchanged. No Stripe SDK was introduced -- all Stripe API calls remain native `fetch`. No refund
+handling was added in this milestone.
+
+## 18. Security and Testing Hardening (M14)
+
+M14 adds application-level rate limiting, a concurrency fix for the M13 webhook first-row race, and
+voice-path load testing. Security properties are documented in
+[SECURITY.md §16](SECURITY.md#16-rate-limiting-and-ci-enforced-scanning-m14); this section covers
+the implementation design.
+
+### 18.1 Rate limiter: fixed window, atomic counter
+
+`rate-limit.service.ts`'s `checkAndConsume(key, limit, windowMs)` computes a deterministic window
+boundary (`floor(now/windowMs)*windowMs`) and calls a single atomic
+`INSERT ... ON CONFLICT (key, window_start) DO UPDATE SET count = count + 1 RETURNING count` against
+the existing shared Postgres database (no Redis, no new infrastructure) -- concurrency-safe without
+an application-level lock, since the increment is one statement. The HTTP-layer glue
+(`middleware/require-rate-limit.ts`) sets `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset`
+on every response and `Retry-After` plus a `429` on rejection, and fails open (logs, lets the request
+through) if the rate-limit repository itself errors. `requireRateLimit` is an Express middleware
+factory for routes where the key is known at mount time; `applyRateLimit` is the same check/response
+logic called directly from a controller for routes where the key (an organization id) is only known
+after an async, in-handler resolution step -- exactly the case for the three webhook endpoints below.
+
+Endpoint-specific limits, each with an organization-scoped bucket key where organization identity is
+available: `/auth/login` 10/15min and `/auth/register` 5/60min (per IP -- no organization identity
+exists pre-authentication); `/internal/v1/...` 1000/min (per-organization bucket plus one global
+bucket for the single route that precedes organization-token verification); `POST
+/twilio/sms-status` 300/min/org; `POST /twilio/sms-inbound` 60/min/org; `POST /stripe/webhook`
+100/min/org. `WS /twilio/media-stream` has no application-level limiter -- unchanged, still deferred
+to infrastructure per §14.6/SECURITY.md §10.
+
+### 18.2 Stripe webhook rate-limiting placement
+
+`stripe-webhook.controller.ts`'s `handleWebhook` orders work as: raw-body handling → Stripe secret
+load → `verifyStripeSignature` → event-type identification → a faithful, read-only organization
+resolution (`resolveSubscriptionEventOrganization`/`resolveInvoiceEventOrganization`, exported from
+the same sync-service files `processEvent()` itself uses, so there is exactly one implementation of
+each resolution strategy, not a second copy that could drift) → `applyRateLimit` (only if an
+organization was resolved and the event type is one `processEvent()` itself supports) → the existing,
+unmodified `processEvent()`. A rejected request returns before `processEvent()` is ever called -- no
+dedupe-table insert, no advisory-lock acquisition, no mutation. The resolver's read is a top-level,
+non-transactional read; `processEvent()`'s own transactional resolution (next) remains the sole
+authoritative source for the actual mutation, so the rate limiter is advisory relative to it, not a
+substitute for it.
+
+### 18.3 Organization-scoped advisory lock (concurrency fix)
+
+`services/organization-lock.ts` exports `acquireOrganizationLock(tx, organizationId)`, which runs
+`SELECT pg_advisory_xact_lock(hashtextextended(organizationId, 0))` inside the caller's own
+transaction -- automatically released on commit/rollback, no explicit unlock call. It is called from
+two production paths, serializing them against each other for the same organization: the Stripe
+subscription-sync transaction (once organization resolution succeeds, before the first-row decision)
+and `ensureStripeCustomer()` (via `createDrizzleOrganizationSubscriptionLockRunner`, which acquires
+the lock as part of entering its own short transaction). `hashtextextended` (64-bit) is used over
+`hashtext` (32-bit) for a lower-collision key space matching `pg_advisory_xact_lock`'s single-bigint
+form. See SECURITY.md §14 for the race this closes and the real-PostgreSQL integration test that
+verifies it.
+
+### 18.4 Voice-path load testing
+
+Artillery (`^2.0.34`, a new devDependency of a dedicated load-test workspace) exercises both the
+Node/Express HTTP surface and the Python/FastAPI `/twilio/media-stream` WebSocket path from one
+framework. Three scenarios were run locally (not in CI): media-stream connection lifecycle, internal
+API burst traffic, and the Stripe webhook concurrency scenario that reproduced the M13 first-row race
+(§18.3) -- see TASKS.md's M14 Step 4 notes for the exact per-scenario numbers. These results
+characterize behavior under the specific load pattern and VU counts each scenario configured; they
+are not a production-scale capacity or throughput guarantee, and no scenario was run against a
+staging or production-like deployment.
