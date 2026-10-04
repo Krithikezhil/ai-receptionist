@@ -623,3 +623,188 @@ section has not been written yet); this section covers only the security-relevan
   contact information -- addressing it (retention windows, export, deletion, redaction) falls
   under milestone **M14**'s already-stated full-hardening scope (see the Status line above), not
   a claim that any part of it is already built.
+
+## 13. Dashboard calls/analytics endpoints and usage tracking (M12)
+
+Full implementation detail lives in [TASKS.md](TASKS.md)'s M12 tracking (ARCHITECTURE.md §16
+covers the architecture); this section covers only the security-relevant parts.
+
+* **Same authentication/authorization chain as every other dashboard resource.**
+  `GET /organizations/:organizationId/calls` and `GET /organizations/:organizationId/analytics`
+  both require `requireAuth` followed by `requireOrgMembership` (`organizations.routes.ts`) -- no
+  new middleware, no new credential type, and no relaxed check for being "read-only" endpoints.
+* **Membership is re-verified from the database on every request, never from client state.**
+  `requireOrgMembership` reads `:organizationId` from the URL but independently re-queries
+  `MembershipRepository.findByOrgAndUser(organizationId, req.user.id)` each time; no cached or
+  session-stored "current organization" is ever treated as authorization (§1). A non-member
+  receives `404`, not `403` -- identical to every other organization-scoped resource -- so this
+  endpoint cannot be used to enumerate which organization ids exist versus which the caller
+  belongs to.
+* **Organization scoping is enforced at the repository query layer, not filtered in memory.**
+  `CallRepository`, `AppointmentRepository`, and `SmsNotificationRepository`'s
+  `listByOrganizationId`/`listByOrganizationIdBetween` methods all include
+  `eq(<table>.organizationId, organizationId)` directly in their `WHERE` clause (mirroring
+  `LeadRepository`'s existing precedent, §12) -- there is no code path in this feature that fetches
+  a broader set and filters by organization afterward.
+* **`AnalyticsService` composes already-scoped calls; it introduces no independent data-access
+  path.** Its all-time counts and 30-day usage queries both go through
+  `AppointmentService`/`LeadService`/`CallService` or the raw `*Repository` methods above -- every
+  one of them already organization-scoped -- so this service has no query surface capable of
+  returning another organization's data even in principle.
+* **The frontend organization context is never the security boundary.** As with every other
+  organization-scoped view (§1, §3), the dashboard's client-side notion of "current organization"
+  is UX only; the backend independently re-verifies membership against the organization id in the
+  URL on every request, regardless of what the frontend believes is selected.
+* **Usage introduces no new cross-tenant surface or billing/metering mechanism.** The 30-day usage
+  numbers are derived by counting existing, already-organization-scoped call/SMS/appointment rows
+  -- no new table, no new external billing integration, and no data shared across organizations.
+  This is explicitly distinct from M13's future metered-billing scope (§7, TASKS.md).
+
+## 14. Stripe webhook event synchronization (M13)
+
+`StripeSubscriptionSyncService` (`services/stripe-subscription-sync.service.ts`) processes
+`customer.subscription.created|updated|deleted` events after the existing signature boundary
+(`auth/stripe-webhook-signature.ts`) has already verified the request. This section covers only
+one accepted, bounded concurrency limitation in that pipeline -- see ARCHITECTURE.md for the rest
+of the design.
+
+* **`FOR UPDATE` protects every write to an existing subscription row.** Before applying a
+  mutation, the sync service calls `findByStripeSubscriptionIdForUpdate`, which issues
+  `SELECT ... FOR UPDATE` (no `SKIP LOCKED`) against the `organization_subscriptions` row for that
+  subscription. Once a row exists, this serializes any two overlapping transactions processing
+  events for the same subscription -- the second genuinely waits for the first to commit before
+  reading the latest-applied timestamp, so the ordering check (§ dedupe/ordering below) is
+  evaluated against up-to-date state.
+* **It cannot lock a row that does not exist yet.** `SELECT ... FOR UPDATE` has nothing to select
+  when no `organization_subscriptions` row has ever been written for a given subscription. Two
+  genuinely concurrent, first-ever webhook deliveries for the same brand-new subscription can
+  therefore both reach the ordering check before either has committed, each believing it is the
+  first/newest event. This is a real, accepted limitation of the current design, not an oversight
+  papered over -- do not read this pipeline as fully concurrency-safe for that specific case.
+* **Existing unique constraints still prevent cross-tenant corruption even in that race.** The
+  `organization_subscriptions_stripe_customer_id_unique` and
+  `organization_subscriptions_stripe_subscription_id_unique` constraints (schema.ts,
+  `0013_giant_jubilee.sql`) guarantee two different organizations can never end up sharing the
+  same Stripe customer or subscription id -- a genuine attempt throws a constraint-violation error
+  (mapped to a `500` by the service's centralized error handling) rather than silently
+  cross-contaminating tenant data. What these constraints do **not** guarantee is that the
+  chronologically newest event's data is what survives a first-row race -- only that the row
+  itself is never duplicated or misattributed to the wrong organization.
+* **This residual risk is now closed (M14 Step 4).** The gap described above was reproduced under
+  real concurrent load (see TASKS.md's M14 Step 4 Artillery results) and remediated with an
+  organization-scoped PostgreSQL transaction advisory lock --
+  `pg_advisory_xact_lock(hashtextextended(organizationId, 0))`, implemented in
+  `services/organization-lock.ts` and acquired once the organization is resolved, before the
+  first-row decision. The same lock (keyed by `organizationId`, not by Stripe subscription id) is
+  shared by both production paths capable of creating the first `organization_subscriptions` row:
+  this webhook sync service and `ensureStripeCustomer()` (§15.1/15.2), so a webhook delivery and a
+  concurrent customer-creation request for the same organization are also serialized against each
+  other, not just two webhook deliveries. Verified by a dedicated real-PostgreSQL integration suite
+  (`apps/api/tests/integration/organization-subscription-lock.integration.spec.ts`) that holds the
+  production lock open as a deterministic barrier and confirms a second concurrent acquirer
+  genuinely blocks -- see ARCHITECTURE.md §18 for the mechanism's design detail.
+
+## 15. Stripe billing endpoints and usage-reporting security (M13 Steps 5-9)
+
+This section documents the security properties of the Stripe customer/Checkout/Billing Portal
+endpoints, setup-fee webhook synchronization, and the usage-reporting worker added in M13 Steps 5-9.
+It does not restate §14's existing webhook signature/raw-body/subscription-sync-concurrency
+discussion, which is unchanged.
+
+### 15.1 Authentication, authorization, and tenant identity
+
+Every M13 billing endpoint requires an authenticated request and organization membership
+(`requireAuth` + `requireOrgMembership`). `GET .../subscription` is read-only and requires only
+membership -- it is not owner-gated. The three mutating actions --
+`POST .../subscription/stripe-customer`, `POST .../subscription/checkout-session`, and
+`POST .../subscription/billing-portal` -- additionally require the owner role (`requireOwner`, the
+same pattern already used by `phone-numbers`/`calendar-connection`). Organization identity for all of
+these endpoints comes from the authenticated route's `req.params.organizationId`; it is not accepted
+from a request body or query parameter.
+
+### 15.2 Stripe secret and response-data boundaries
+
+`STRIPE_SECRET_KEY` is server-side only, read inside the native-`fetch`-based `StripeClient`; the
+application does not use a Stripe SDK and does not expose this credential to the frontend.
+`GET .../subscription` does not return `stripeCustomerId` or `stripeSubscriptionId`. The Checkout
+Session and Billing Portal endpoints return only `{ url }`. The Billing Portal flow resolves the
+Stripe customer server-side from the organization's persisted subscription/customer state and does
+not trust an attacker-supplied `stripeCustomerId` in the request. Idempotency keys for the
+customer-creation, Checkout, and Billing Portal calls are all generated server-side, never accepted
+from the client. Checkout's success/cancel URLs and the Billing Portal's return URL come from server
+configuration (`STRIPE_CHECKOUT_SUCCESS_URL`, `STRIPE_CHECKOUT_CANCEL_URL`,
+`STRIPE_BILLING_PORTAL_RETURN_URL`), not from a client-supplied redirect target.
+
+### 15.3 Setup-fee webhook tenant isolation and concurrency
+
+Setup-fee invoice synchronization resolves the organization from the Stripe customer mapping
+(`findByStripeCustomerId`) and does not accept organization identity from the incoming invoice
+payload. An invoice is identified as a setup-fee invoice only when `billing_reason ===
+"subscription_create"` and at least one line item's Price matches the configured
+`STRIPE_SETUP_PRICE_ID`. The synchronization service takes a row lock
+(`findByOrganizationIdForUpdate`) before applying any setup-fee state change. Ordering is enforced so
+an older, different invoice cannot overwrite a newer stored invoice merely because webhook delivery
+arrived out of order; the same invoice id is allowed to progress from `failed` to `paid` when a later
+event represents successful payment. The existing `stripe_webhook_events` deduplication mechanism is
+reused unchanged. No refund-event synchronization is implemented.
+
+### 15.4 Usage-reporting tenant isolation and idempotency
+
+The usage-reporting worker processes ledger rows per organization
+(`CallUsageReportRepository.listUnreportedByOrganizationId()`), never through a global, unscoped
+query; that method scopes rows to the given organization and filters on `reportedAt IS NULL`, so an
+already-reported ledger row is excluded from every later poll and is not selected again by the worker.
+The Stripe customer is resolved from the ledger row's own `organizationId`. Each call uses the
+deterministic identifier `call-usage:{callId}`, reused unchanged across retries of the same call as
+both the Stripe Meter Event `identifier` and the request's `Idempotency-Key`. `meterEventIdentifier`
+and `reportedAt` are persisted on the ledger row only after Stripe confirms acceptance of the report;
+if reporting fails, the row remains unreported and is retried on a later poll. These are two distinct
+safeguards, not one: the `reportedAt IS NULL` query filter is what prevents an already-reported row
+from ever being re-selected, while the deterministic identifier is what prevents a duplicate
+Stripe-side event if a still-unreported call's report is retried.
+
+Billing-period usage aggregation (`sumBillableMinutesByOrganizationIdBetween`) is based on the
+underlying call's `endedAt` falling within the requested billing-period bounds, not on `reportedAt` or
+ledger creation time.
+
+### 15.5 Frontend boundary
+
+The frontend billing model (`apps/web/src/lib/billing.ts`'s `SubscriptionStatus`) exposes only the
+billing status fields needed for display -- plan, status, billing period, usage-period minutes, and
+`setupFeeStatus` -- and does not expose `stripeCustomerId`, `stripeSubscriptionId`,
+`setupFeeInvoiceId`, or `setupFeeInvoiceCreatedAt`.
+
+## 16. Rate limiting and CI-enforced scanning (M14)
+
+Closes the rate-limiting and CI-scanning gaps noted in §7 above. Design rationale and the
+rate-limiter/advisory-lock mechanisms live in [ARCHITECTURE.md §18](ARCHITECTURE.md#18-security-and-testing-hardening-m14);
+this is the security-property summary.
+
+* **Rate limiting is PostgreSQL-backed (fixed window, atomic counter), org-scoped wherever
+  organization identity is available**, never keyed on an unverified client-supplied identifier:
+  * `/auth/login`: 10 requests/15min per IP; `/auth/register`: 5 requests/60min per IP.
+  * `/internal/v1/...`: 1000 requests/minute, via a per-organization bucket for
+    organization-scoped routes and a single global bucket for the one route that precedes
+    organization-token verification.
+  * `POST /twilio/sms-status`: 300 requests/minute/org, fixed 60,000ms window, keyed after
+    `X-Twilio-Signature` verification and organization resolution.
+  * `POST /twilio/sms-inbound`: 60 requests/minute/org, fixed 60,000ms window, same
+    signature-then-resolution ordering.
+  * `POST /stripe/webhook`: 100 requests/minute/org, fixed 60,000ms window, keyed after Stripe
+    signature verification and a faithful organization resolution, and applied before
+    `processEvent()` -- a rejected request never reaches event processing. An event whose
+    organization cannot be resolved, or whose type is unsupported, is never rate-limited (no
+    invented global fallback bucket); invalid signatures consume no rate-limit unit on any of the
+    three webhook endpoints above.
+  * `WS /twilio/media-stream` remains **deferred to infrastructure**, unchanged -- see §10, which
+    this section does not alter.
+* **CI-enforced scanning**: a dedicated `secrets` job runs `gitleaks/gitleaks-action@v3` against
+  full commit history (`fetch-depth: 0`), failing the build on any finding; the `node` job runs
+  `npm audit --audit-level=high` (HIGH/CRITICAL findings fail, lower severities are reported only);
+  the `voice-agent` job runs `uv run pip-audit` (any finding fails -- no severity API available).
+  These three mechanisms are verified against pushed history (GitHub Actions run `36578099571`);
+  this section does not claim the overall workflow is currently green end-to-end, only that these
+  specific scanning steps exist and have passed.
+* **Not claimed**: this section documents only the mechanisms above, not exhaustive security
+  coverage -- no account lockout, no WAF, no DDoS protection, no distributed rate-limiting backend
+  beyond the single shared Postgres instance already in use.
