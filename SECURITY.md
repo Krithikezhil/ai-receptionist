@@ -313,9 +313,9 @@ Being explicit about what exists so this section stays honest rather than aspira
 
 ## 7. Known gaps (expected at this stage — see TASKS.md)
 
-* **No rate limiting or account lockout** on `/auth/login` or `/auth/register` — the most
-  significant near-term hardening item, now joined by the M3 mutating endpoints as additional
-  surface that would benefit from it.
+* ~~No rate limiting or account lockout on `/auth/login` or `/auth/register`~~ — **rate limiting
+  resolved in M14**, see §16 (10/15min and 5/60min per IP respectively). Account lockout is still
+  not implemented.
 * **No CSRF token** beyond `SameSite=Lax` — M3 adds real mutating endpoints, raising the value of
   this hardening item for M14.
 * **No PostgreSQL Row-Level Security** — application-layer scoping (`requireOrgMembership` +
@@ -335,8 +335,9 @@ Being explicit about what exists so this section stays honest rather than aspira
   reissue/rotation endpoint for it at all, so recovering from a leaked one currently requires a
   direct database update. Deliberately accepted for this foundation milestone (§8); a self-service
   rotation/reissue endpoint is deferred until a real rotation requirement exists.
-* **No rate limiting on `/internal/v1/...`** either — same pre-existing, already-documented gap as
-  `/auth/*`, not newly introduced by M5.
+* ~~No rate limiting on `/internal/v1/...`~~ — **resolved in M14**, see §16 (1000 requests/minute,
+  via a per-organization bucket and a single global bucket for the one pre-organization-identity
+  route).
 * **Pipecat/provider dependency surface: construction paths are tested, live calls are not** — M6
   added unit tests that construct each real provider class (`DeepgramSTTService`/
   `OpenAILLMService`/`CartesiaTTSService`) with dummy credentials to verify correct wiring
@@ -347,8 +348,8 @@ Being explicit about what exists so this section stays honest rather than aspira
   (`tsvector`), no embeddings, no vector database, no external search service. Sufficient at this
   scale; explicitly not a step toward RAG (see ARCHITECTURE.md §11 on how a future RAG milestone
   would extend the schema additively instead).
-* **No CI-enforced security scanning** (`npm audit`, `pip-audit`, secret scanning) — planned for
-  M14.
+* ~~No CI-enforced security scanning (`npm audit`, `pip-audit`, secret scanning)~~ — **resolved in
+  M14**, see §16 (Gitleaks, `npm audit --audit-level=high`, and `pip-audit`).
 * **No dependency-update automation** (Dependabot/Renovate) configured yet.
 * **Postgres integration is untested against a real database** — Docker unavailable in this
   environment (a local, unrelated Postgres instance was found listening on `localhost:5432` and
