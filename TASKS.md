@@ -1503,6 +1503,455 @@ UI) do not exist yet.
       Documentation pass: `TASKS.md` completion status, `ARCHITECTURE.md`/`SECURITY.md` updates
       for the finalized usage-reporting idempotency design and any new endpoints.
 
+## M14 -- Security and testing (in progress)
+
+Authoritative M14 scope per [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): "Dedicated hardening
+pass: CI-enforced dependency scanning (`npm audit`, `pip-audit`, secret scanning), tenant-isolation
+test coverage across every org-scoped endpoint introduced since M3, rate limiting, load testing on
+the voice path." Four sub-scopes, nothing beyond what that sentence states.
+
+**Confirmed starting state (read-only findings this checklist depends on):**
+- `.github/workflows/ci.yml` runs only `npm run lint`/`typecheck`/`test`/`build` (Node) and
+  `uv run ruff check`/`ruff format --check`/`mypy`/`pytest` (voice-agent) -- no `npm audit`, no
+  `pip-audit`, no secret-scanning step exists anywhere in CI.
+- No rate-limiting package (e.g. `express-rate-limit`) is a dependency of `apps/api` -- only
+  `helmet` (security headers, unrelated) is installed. SECURITY.md's own "Known gaps" sections
+  have documented the absence of rate limiting on `/auth/*` (since M2), `/internal/v1/...` (since
+  M5), and `/twilio/media-stream` (since M7) without it ever being closed, each explicitly
+  deferring the fix to M14.
+- No load-testing tool (k6, Artillery, Locust, or a custom script) exists anywhere in this
+  repository -- no config, no script, no CI job.
+- Tenant-isolation tests already exist for every milestone from M3 onward (M3 organizations, M4
+  knowledge/receptionist-config, M5 service-auth, M7 phone-numbers/call-credential, M8 knowledge
+  chunks, M9 leads, M12 dashboard/analytics, M13 Stripe billing), each documented in its own
+  SECURITY.md section. What does not yet exist is a single, dedicated, cross-milestone audit pass
+  confirming that coverage holistically, across every org-scoped endpoint that exists today.
+
+**Step 1: CI-enforced dependency and secret scanning**
+- [x] Decide the secret-scanning approach -- **Gitleaks Action v3** (`gitleaks/gitleaks-action@v3`),
+      explicitly chosen over trufflehog/detect-secrets/GitHub native secret scanning.
+- [x] Add `npm audit` as a CI step for the Node workspaces -- `npm audit --audit-level=high` in the
+      `node` job; HIGH/CRITICAL findings fail the build, lower severities are reported but do not
+      fail (commit `b86cfd5`).
+- [x] Add `pip-audit` as a CI step for `services/voice-agent` -- `uv run pip-audit` in the
+      `voice-agent` job; any reported vulnerability fails the build, since pip-audit has no
+      supported severity threshold (commit `b86cfd5`).
+- [x] Add the selected secret-scanning step to CI -- a dedicated `secrets` job runs
+      `gitleaks/gitleaks-action@v3` with `actions/checkout@v7`/`fetch-depth: 0` and `GITHUB_TOKEN`;
+      no `GITLEAKS_LICENSE` (not required for this personal-account repository); no
+      allowlist/exclusions; fails CI on any finding (commit `07f955f`).
+- [x] Decide and document the failure policy -- npm audit: `--audit-level=high` (HIGH/CRITICAL fail,
+      lower severities reported only); pip-audit: any finding fails (no severity API available --
+      see notes below); Gitleaks: any finding fails, no bypass.
+
+**Step 1 implementation notes:**
+- The `pip-audit` step surfaced a real, then-current vulnerability (`PYSEC-2026-3740` /
+  `GHSA-8mgp-746c-j5xp` / `CVE-2026-81726`) in `nltk 3.10.3`, transitively required by
+  `pipecat-ai 1.8.1`. Remediated by upgrading `pipecat-ai` to `1.12.0` (commit `b86cfd5`), which
+  drops `nltk` entirely in favor of `sentencex==1.0.31` -- confirmed via a source-level
+  compatibility review (all 33 Pipecat symbols this codebase imports still resolve, live-verified
+  against the installed 1.12.0 package) and a clean post-upgrade `pip-audit` run (0
+  vulnerabilities).
+- Local Windows Application Control (Smart App Control) blocked `pytest`/`mypy` native executable
+  startup on the development machine during verification of this upgrade -- a local-environment
+  limitation, not a defect in the upgrade or the CI configuration; no Windows security control was
+  disabled to work around it. `ruff check`/`ruff format --check` ran successfully (aside from two
+  pre-existing, unrelated formatting-drift files).
+- **Remote verification complete for M14 Step 1's three mechanisms:** GitHub Actions run
+  `36578099571`, triggered by commit `07f955f`, executed all three checks against the pushed
+  history.
+  - `npm audit --audit-level=high`: **PASSED**. Actual CI output reported 4 moderate-severity
+    `esbuild` vulnerabilities; reported but did not fail the step, since the configured threshold
+    is HIGH/CRITICAL.
+  - `uv run pip-audit`: **PASSED**. Actual remote output reported no known vulnerabilities. The
+    private `voice-agent` package was skipped as not published to PyPI; the audited dependency
+    tree was the pushed Pipecat 1.12.0 / sentencex 1.0.31 tree with NLTK removed.
+  - Gitleaks: **PASSED**. The dedicated `secrets` job ran `gitleaks/gitleaks-action@v3` with
+    `actions/checkout@v7` and `fetch-depth: 0`; the actual run reported 13 commits scanned and
+    `No leaks detected`.
+  - All three M14 Step 1 security mechanisms are therefore remotely verified.
+  - **This does not mean the overall CI workflow is green.** The same run (`36578099571`) also had
+    an unrelated `Node` job `npm run typecheck` failure, which caused the subsequent Node
+    `test`/`build` steps in that job to be skipped. That failure is outside M14 Step 1's scope and
+    stems from application-source changes that remain uncommitted locally and are therefore not
+    yet present on `origin/main`. M14 Step 1's remote security-check verification is complete;
+    overall CI remains red because of that separate, unrelated typecheck issue.
+
+**Step 2: Cross-milestone tenant-isolation audit**
+- [x] Dedicated audit/review step: walked org-scoped endpoints introduced since M3 and confirmed
+      each still uses the established `requireAuth`/`requireOrgMembership` (or the M5/M7
+      service-auth equivalent) pattern, with no bare-resource-id-without-organization-scope
+      regression found.
+- [x] Documented the audit's findings -- see the implementation notes below.
+- [x] Where the audit found a genuine coverage gap, added a focused test for that specific gap;
+      no blanket new tests were added for endpoints whose existing milestone-level test suite
+      already provided adequate coverage.
+
+**Step 2 implementation notes:**
+- Confirmed existing tenant-isolation test coverage already adequately protects four
+  previously audited areas -- no new tests were added for these, since their existing coverage
+  already includes explicit cross-organization denial assertions:
+  - public `GET /:organizationId/calls`
+  - public `GET /:organizationId/analytics`
+  - public `PATCH`/`DELETE /:organizationId/knowledge/:knowledgeId`
+  - internal `POST /organizations/:organizationId/calls`
+- Identified a test-coverage gap -- not a newly discovered production authorization bypass,
+  since both routes already use the same `serviceAuth`/`organizationAuth` middleware chain
+  already proven correct on their sibling internal routes -- for two internal appointment
+  endpoints that lacked cross-organization test coverage:
+  - `GET /internal/v1/organizations/:organizationId/appointments/availability`
+  - `POST /internal/v1/organizations/:organizationId/appointments`
+- Closed that gap in `apps/api/tests/internal-api.test.ts` with test-only changes; no
+  production authentication, authorization, middleware, rate-limit, schema, migration, or
+  dependency change was required:
+  1. a same-organization appointment-availability success test;
+  2. a cross-organization appointment-availability denial test;
+  3. the deterministic fake-calendar-connection setup required by the same-org availability
+     test, reusing the existing `fakeCalendarConnectionService` fixture already used by the
+     sibling booking tests;
+  4. an `orgBId` setup added to the existing booking describe block's fixture, for the new
+     isolation test;
+  5. exactly one cross-organization appointment-booking denial test.
+  The two existing appointment-confirmation SMS tests were left unchanged. An unused
+  `orgBToken` declaration/assignment introduced during an intermediate edit was removed before
+  finalizing.
+- Targeted verification (Vitest's `-t` name filter, run individually): same-organization
+  availability -- passed; cross-organization availability denial -- passed; cross-organization
+  booking denial -- passed; the existing appointment-confirmation SMS test (with phone) --
+  passed; the existing no-phone SMS test -- passed. 5 of 5 relevant tests passed in targeted
+  isolation.
+- The full `tests/internal-api.test.ts` file run was attempted twice; both attempts hit the
+  same pre-existing, intermittent Windows Vitest worker crash (`0xC0000005` /
+  `STATUS_ACCESS_VIOLATION` -- the same documented flake referenced under Step 3's environment
+  blocker below) at different points in the file, with no assertion failure in either attempt.
+  This is not a fix for that crash, and the full-file run has not completed successfully
+  end to end on this local machine -- only the individually targeted tests above are confirmed
+  passing.
+- `git diff --check` passed (exit 0) and `npm run typecheck` passed (exit 0) against the
+  working tree including this change. A final diff review confirmed only the intended M14
+  Step 2 test changes were present in `apps/api/tests/internal-api.test.ts`; pre-existing
+  unrelated dirty hunks in that file were left untouched.
+- Nothing from this Step 2 work has been staged, committed, or pushed.
+
+**Step 3: Rate limiting**
+- [x] Decide the rate-limiting approach -- PostgreSQL-backed, using the existing shared
+      `apps/api` database as the authoritative store. No Redis is used, despite Redis already
+      being provisioned in `infrastructure/docker/docker-compose.yml` for other purposes.
+- [x] Decide which library, if any, implements the chosen approach -- none; implemented with
+      native `pg`/Drizzle primitives only (atomic `INSERT ... ON CONFLICT ... DO UPDATE`
+      increment), no rate-limiting package added.
+- [x] Apply rate limiting to `/auth/login`/`/auth/register` (the longest-standing documented
+      gap) -- implemented (10/15min and 5/60min per IP respectively).
+- [x] Apply rate limiting to `/internal/v1/...` (documented gap since M5) -- implemented: 1000
+      requests/minute, via two independent bucket types confirmed directly from
+      `internal.routes.ts` -- a per-organization bucket (`internal-org:{organizationId}`,
+      verified via the caller's per-organization service token) applied to six
+      organization-scoped routes, and a single global bucket (`internal-global`) applied to the
+      one route that precedes organization-token verification (the phone-number lookup route
+      that establishes organization identity).
+- [x] `/twilio/media-stream` connection-rate limiting / connection cap -- resolved as
+      **deferred to infrastructure**, not application code. This is not a new decision made in
+      M14: it restates the existing M7 architectural decision already recorded in
+      [SECURITY.md §10](SECURITY.md) ("no connection-rate limiting or concurrent-connection cap
+      on `/twilio/media-stream`, left to a future infra-aware milestone (a reverse proxy/load
+      balancer in front of a real deployment, not application code here)"). No Python/FastAPI
+      connection-cap logic was proposed or implemented in `services/voice-agent` for M14.
+- [x] Twilio SMS status (`POST /twilio/sms-status`) application-level rate limiting --
+      implemented: 300 requests/minute per organization, fixed 60,000ms window, org-scoped key
+      `twilio:sms-status:${organizationId}`. Signature verification (`verifyTwilioSignature`) and
+      organization resolution (via the existing provider-message-SID lookup) both run before the
+      limiter. Verified by focused tests in `tests/twilio-sms-status-webhook.test.ts`.
+- [x] Twilio SMS inbound (`POST /twilio/sms-inbound`) application-level rate limiting --
+      implemented: 60 requests/minute per organization, fixed 60,000ms window, org-scoped key
+      `twilio:sms-inbound:${organizationId}`. Signature verification (`verifyTwilioSignature`) and
+      organization resolution (via the existing phone-number-to-organization lookup) both run
+      before the limiter. Verified by focused tests in `tests/twilio-sms-inbound-webhook.test.ts`.
+- [x] Stripe webhook (`POST /stripe/webhook`) application-level rate limiting --
+      implemented: 100 requests/minute per organization, fixed 60,000ms window, org-scoped key
+      `stripe:webhook:${organizationId}`. Signature verification (`verifyStripeSignature`) and a
+      faithful organization resolution (the existing three-tier subscription-event resolution --
+      Stripe subscription ID, then Stripe customer ID, then validated `metadata.organizationId`
+      -- or the existing single-customer-ID invoice/setup-fee resolution, depending on event
+      category) both run before the limiter, which itself runs before `processEvent()`. A
+      rejected request receives 429 and never reaches `processEvent()`. Invalid signatures,
+      unsupported event types, and events whose organization cannot be resolved are never
+      rate-limited (no global fallback bucket). Existing `processEvent()` transaction boundaries,
+      dedupe behavior, advisory-lock behavior, and mutation ordering were not decomposed. Verified
+      by focused tests in `tests/stripe-webhook-route.test.ts` and
+      `tests/stripe-setup-fee-sync.service.test.ts`.
+- [x] Tests for rate-limiting behavior (threshold reached results in a rejection response),
+      following the existing Supertest HTTP-integration convention -- real HTTP-level 429
+      boundary tests exist for the three smaller-limit buckets (A: login 10/15min, B: register
+      5/60min, C2: organization billing-portal 10/10min). The two larger-limit buckets (C1:
+      300/min per organization, D: 1000/min per organization/global) are proven at their
+      configured threshold by the existing `rate-limit.service.test.ts` unit-level suite rather
+      than a real 300- or 1000-request HTTP loop, a deliberate decision to avoid slow/flaky HTTP
+      loops -- see the verification notes below for the full per-file breakdown.
+
+**Step 3 verification notes:**
+- `tests/rate-limit.service.test.ts`: 10/10 passed (unit-level, real service/middleware against
+  a real in-memory repository, no HTTP layer). This suite is the sole verification that the C1
+  (300/min) and D (1000/min) buckets actually reject once their configured threshold is reached;
+  no real 300- or 1000-request HTTP loop was created for either bucket, by deliberate decision.
+- `tests/organizations.test.ts`: 27/27 passed (full file). Of these, the 6 M14 C1 rate-limiting
+  tests were independently re-run in isolation this session (`-t "rate limiting"`): 6 passed, 21
+  skipped, exit 0. C1 HTTP coverage: `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset`
+  headers on an allowed response, per-organization bucket isolation, that a rejected cross-org
+  request carries no rate-limit headers and does not consume the caller's own bucket, and that
+  `POST`/`GET /organizations` and `DELETE .../calendar` are excluded from the limiter. No real 429
+  is reached here (300/min); that threshold is covered only by `rate-limit.service.test.ts` above.
+- `tests/organization-subscription.test.ts`: 40/40 passed (full file; grew by one test this round
+  from the previously documented 39/39). Of these, the 3 M14 C2 rate-limiting tests were
+  independently re-run in isolation this session: 3 passed, 37 skipped, exit 0. C2 HTTP coverage:
+  header-contract on an allowed response, per-organization bucket isolation, and -- newly added
+  this round -- a real HTTP boundary test sending 10 allowed requests followed by an 11th that
+  returns 429 with `RateLimit-Limit=10`, `RateLimit-Remaining=0`, `RateLimit-Reset`, and
+  `Retry-After` all present.
+- `tests/twilio-phone-lookup.test.ts`: 11/11 passed (full file). Of these, the 2 M14 D
+  (global-bucket) rate-limiting tests were independently re-run in isolation this session: 2
+  passed, 9 skipped, exit 0 (this session's own observed figure; an earlier draft of this note
+  had incorrectly stated 1 passed/10 skipped for this file and was corrected against the actual
+  run). Coverage: header-contract on an allowed response, and that the global bucket is shared
+  across different organizations' phone numbers (the second lookup's `RateLimit-Remaining` is
+  exactly one less than the first's). No real 429 is reached here (1000/min); that threshold is
+  covered only by `rate-limit.service.test.ts` above.
+- `tests/internal-api.test.ts`: the 3 M14 D (per-organization bucket, internal API)
+  rate-limiting tests were independently run in isolation this session (`-t "rate limiting"`, to
+  avoid the documented Windows Vitest worker crash risk on a full-file run of this file): 3
+  passed, 59 skipped, exit 0. Coverage: header-contract on an allowed response, per-organization
+  bucket isolation, and that a rejected wrong-org-token request (403, decided before the limiter
+  runs) carries no rate-limit headers and leaves the target organization's own bucket unconsumed.
+  The full file (62 tests total) was not run in this pass -- see the Windows Vitest worker-crash
+  note below for why a full-file run of this specific file is avoided where a targeted `-t`
+  filter is sufficient.
+- `tests/auth.test.ts`: 16/16 passed (full file). Of these, the 4 M14 A/B rate-limiting tests were
+  independently re-run in isolation this session (`-t "rate limiting"`): 4 passed, 12 skipped,
+  exit 0. Coverage for both A (login, 10/15min) and B (register, 5/60min): a real HTTP 429
+  boundary test (11th/6th request respectively) asserting `RateLimit-Remaining=0`,
+  `RateLimit-Reset`, and `Retry-After`, plus a header-contract test on an allowed response
+  asserting `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset`. Separately,
+  `tests/auth.test.ts`'s M14 A login rate-limiting test had earlier required a test-only
+  correction: `expect(res.status).toBe(400)` was changed to `expect(res.status).toBe(401)`,
+  because `auth.controller.ts`'s `login` handler deliberately returns 401 (not 400) for
+  schema-validation failure. No production behavior was changed. After that fix, the then-narrower
+  targeted test passed (1 passed, 15 skipped, exit code 0); the broader `-t "rate limiting"` filter
+  used in this round's verification matches all 4 A/B tests, as reported above.
+- Header contract, confirmed directly from `require-rate-limit.ts`'s source and now asserted at
+  the HTTP layer across all five files above: every request that reaches and passes the limiter
+  (an allowed response) receives `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset`;
+  only a rejected (429) response additionally receives `Retry-After`, because the middleware sets
+  that header exclusively in its rejection branch. Allowed-response tests therefore intentionally
+  never assert `Retry-After` -- this is not a coverage gap, it is what the middleware's actual
+  behavior makes possible to assert.
+- No Windows Vitest worker crashes occurred during any of the five targeted `-t "rate limiting"`
+  runs performed this session.
+- The previously documented argon2/Windows Application Control (Smart App Control) blocker did
+  **not reproduce** during this session's runs -- `auth.test.ts`, `organizations.test.ts`,
+  `organization-subscription.test.ts`, `twilio-phone-lookup.test.ts`, and (via the targeted `-t`
+  filter) `internal-api.test.ts` all loaded and ran to completion. This is not a claim that the
+  underlying Windows-level condition is permanently resolved -- see the original investigation
+  retained below.
+- Migration `apps/api/src/db/migrations/0018_dusty_human_fly.sql` exists in the working tree and
+  has **not** been applied to any database.
+- No production security vulnerability was identified during this rate-limiting verification
+  pass.
+- Of the items above that were formerly bundled together: `/twilio/media-stream` is resolved as
+  deferred to infrastructure (restating the existing M7 SECURITY.md §10 decision, not a new one).
+  The Twilio SMS status (`POST /twilio/sms-status`) and Twilio SMS inbound (`POST
+  /twilio/sms-inbound`) webhook rate-limiting items are implemented and verified: 300 and 60
+  requests/minute/org respectively, each with a fixed 60,000ms window and an org-scoped bucket key.
+  The Stripe webhook (`POST /stripe/webhook`) item is now also implemented and verified: 100
+  requests/minute/org, fixed 60,000ms window, org-scoped bucket key, with limiting applied after
+  signature verification and faithful organization resolution and before `processEvent()`. All
+  three items have passing focused tests.
+
+**Known environment blocker (Step 3 test execution, local Windows machine) -- historical
+investigation, superseded above for the four files that have since run successfully:**
+- The standalone unit-level suite `tests/rate-limit.service.test.ts` passed 10/10 tests, exercising
+  the real rate-limit service/middleware against a real in-memory repository directly (no HTTP
+  layer, no `buildTestApp()`).
+- The five HTTP-level focused suites intended to verify Step 3's rate-limiting behavior end to end
+  -- `tests/auth.test.ts`, `tests/organizations.test.ts`, `tests/organization-subscription.test.ts`,
+  `tests/internal-api.test.ts`, `tests/twilio-phone-lookup.test.ts` -- failed to load on this
+  machine, before any individual test executed. The failure occurs while transitively loading the
+  pre-existing argon2 authentication path (via `buildTestApp()` / `auth.service.ts`), not from a
+  rate-limit assertion failure.
+- Exact runtime error: "An Application Control policy has blocked this file."
+- Affected native binary: `node_modules/argon2/prebuilds/win32-x64/argon2.glibc.node` (argon2
+  `0.45.1`).
+- `Get-AuthenticodeSignature` reports `Status: NotSigned` for this binary.
+- Full-history searches of `Microsoft-Windows-CodeIntegrity/Operational` and
+  `Microsoft-Windows-AppLocker/EXE and DLL` found no matching event mentioning the exact block
+  phrase, Smart App Control, argon2, or `.node`.
+- `CiTool.exe -lp` (Microsoft's supported App Control policy-listing diagnostic) returned
+  `E_ACCESSDENIED (0x80070005)` because the session was not elevated -- this result is inconclusive
+  and is not evidence for or against Smart App Control.
+- Windows Security UI was manually observed showing Smart App Control = On; registry
+  `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState` was observed as
+  `1` (per Microsoft's documented mapping, `1` = Enforce).
+- The collected evidence strongly points to Smart App Control as the likely blocking mechanism, but
+  this is an inference, not direct proof -- no retained Code Integrity/AppLocker event directly
+  names Smart App Control and this specific argon2 binary as the blocker.
+- No remediation has been performed: no Windows security setting has been changed, and no
+  dependency/`node_modules` remediation has been performed. Further remediation is intentionally
+  deferred pending explicit authorization.
+
+**Step 4: Load testing on the voice path**
+- [x] Decide the load-testing tool -- **Artillery**, explicitly approved. Selected because the
+      milestone's intended load-testing scope spans two structurally different surfaces: Node/
+      Express HTTP API endpoints (`apps/api`) and the Python/FastAPI `/twilio/media-stream`
+      WebSocket path (`services/voice-agent`); Artillery supports both HTTP and WebSocket
+      load-testing scenarios, allowing one framework to cover both rather than requiring two
+      separate tools. Artillery ^2.0.34 has since been installed as a devDependency of a new,
+      dedicated load-test npm workspace, added to the root workspaces array specifically for this
+      purpose; no load-test scenario, script, or configuration has been created yet. This
+      installation surfaced one new moderate dependency-audit finding, GHSA-8cw4-87c7-c6xx,
+      affecting csv-parse <7.0.2 (a direct dependency of artillery@2.0.34). Source inspection
+      found the vulnerable code path requires columns: true and group_columns_by_name: true to be
+      set together, plus a crafted CSV row containing a duplicated __proto__ header; Artillery's
+      own default options never set either flag, and the only path by which Artillery reaches
+      csv-parse at all is its config.payload CSV-file-loading feature, which none of the approved
+      Scenario A/B/C designs use. No remediation has been applied for this milestone.
+      The following remain separate, still-undefined future decisions: the specific scenario(s)
+      to test, concurrency levels, arrival/request rates, durations, ramp profile, latency/
+      error-rate thresholds, and whether execution happens locally, in CI, or against a
+      staging/production-like environment.
+- [x] Define the specific voice-path scenario(s) to load-test -- three scenarios approved:
+      - **Scenario A -- `/twilio/media-stream` concurrent connection lifecycle.** Concurrent
+        WebSocket connections exercising: connection establishment; the `connected` message; the
+        `start` message carrying a locally-minted, validly-signed call credential (mirroring
+        `test_twilio_media_stream.py`'s existing signing approach); local HMAC credential
+        verification; the resulting `run_session()` path far enough to exercise the real
+        voice-agent/`apps/api` integration, including the internal `get_runtime_context` call;
+        and clean client disconnect/cleanup. Uses the repository's default fake STT/LLM/TTS
+        providers (`STT_PROVIDER`/`LLM_PROVIDER`/`TTS_PROVIDER` all default to `"fake"`) --
+        deliberately does not generate real Deepgram/OpenAI/Cartesia traffic. Explicitly excludes
+        full audio-frame exchange: no existing repository pattern exercises that depth, so this
+        scenario stops at the connection/session-lifecycle level the current implementation and
+        fake-provider setup actually support.
+      - **Scenario B -- internal API under concurrent load.** `GET
+        /internal/v1/organizations/:organizationId/runtime-context` against a real running
+        `apps/api` instance backed by PostgreSQL, as the initial target: it requires both service
+        authentication and organization authentication, uses the per-organization 1000/min
+        internal rate-limit bucket, performs meaningful database-backed work (a 4-way concurrent
+        read aggregation), and does not inherently require Google Calendar or another external
+        provider. Exercises concurrent HTTP requests through the real API and the real
+        PostgreSQL-backed rate limiter.
+      - **Scenario C -- Stripe webhook first-row concurrency/race investigation.** Concurrent,
+        locally-signed `customer.subscription.*` `POST /stripe/webhook` requests for the same
+        brand-new subscription/customer pair with no existing `organization_subscriptions` row,
+        using the repository's local HMAC signing mechanism and a test webhook secret (mirroring
+        `stripe-webhook-route.test.ts`'s existing `sign()` helper) -- no real Stripe account or
+        delivery involved. Purpose: determine whether the theoretical first-row ordering race
+        documented in SECURITY.md §14 can actually be reproduced under concurrent execution, and
+        if so, document its actual observed effect. This is a planned investigation only -- no
+        race has been reproduced, and none is claimed to have been reproduced, by this entry.
+      Explicitly out of scope for Step 4: Twilio-SMS webhook load testing, public `/organizations`
+      API load testing, Google Calendar load testing, and any load testing intended to generate
+      real third-party provider traffic. Still explicitly undefined and deferred to a later,
+      separate approval for all three scenarios: concurrency levels, requests/second or
+      WebSocket/HTTP arrival rate, test duration, ramp-up/ramp-down profile, latency thresholds,
+      error-rate thresholds, exact pass/fail criteria, CI-vs-local execution, staging-vs-
+      production-like execution, PostgreSQL sizing, and external-provider quotas. No Artillery
+      configuration, script, or dependency has been created or installed for this entry.
+- [x] Run the load test and record the results.
+- [x] Document any concurrency/race findings the load test surfaces (e.g. against the
+      already-documented, currently-unverified webhook first-row race in SECURITY.md §14).
+
+**Step 4 implementation notes (Artillery load-test results):**
+- **Scenario A -- media stream** (`arrivalRate: 2`, `maxVusers: 5`, `duration: 10s`): 16 VUs
+  created, 16 completed, 0 failed, 4 skipped due to the `maxVusers` cap; 32 WebSocket messages
+  sent; session length min 2008.7ms, max 3456ms, mean 2297ms, median 2059.5ms, p95/p99 3395.5ms;
+  no WebSocket/HTTP errors. All 16 connections were accepted and all 16 call-credential
+  verifications succeeded; `GET .../runtime-context` returned `200` 16 times; `POST .../calls`
+  returned `201` 16 times -- a 1:1 finalization with no duplicate or missing calls.
+- **Scenario B -- internal API** (`arrivalCount: 10` baseline): 10 VUs, 10 HTTP `200` responses,
+  40 `expect`-plugin assertions passed; latency min 9ms, max 78ms, mean 20ms, median 13.9ms,
+  p95/p99 16.9ms. Rate-limit bucket evidence (request ids 38-47) showed `ratelimit-remaining`
+  decrementing monotonically from 999 to 990, confirming correct, non-racy per-organization
+  bucket consumption under this burst. Tenant isolation was not exercised by this scenario (all
+  requests used one organization's credential); the existing M14 Step 2 cross-organization
+  isolation audit remains the relevant evidence for that property.
+- **Scenario C -- Stripe webhook, batch 1** (`arrivalCount: 5`): the originally approved
+  `duration: 0.5` was corrected to `duration: "500ms"` after Artillery 2.0.34 rejected the bare
+  numeric value as an invalid phase duration before dispatching any request (a configuration
+  defect, not an application-behavior finding). With the corrected duration, batch 1 ran: 4
+  requests returned HTTP `200` and 1 returned HTTP `500`; latency min 17ms, max 190ms, mean 67ms,
+  median 19.1ms, p95/p99 90.9ms (the `5xx` request was ~91ms). Exactly 4 `stripe_webhook_events`
+  rows persisted -- the failed request's event was entirely absent, rolled back together with its
+  transaction. **This run reproduced the documented SECURITY.md §14 first-row race**: the `500`
+  was a real `duplicate key value violates unique constraint
+  "organization_subscriptions_stripe_customer_id_unique"` error. The failure path rolled back
+  cleanly and did not create a duplicate `organization_subscriptions` row. Duplicate-event
+  idempotency was **not** tested by this batch (all five event ids were intentionally unique).
+  Batches 2-5 of the originally planned five independent batches were intentionally not run after
+  the race was reproduced, since remediation was prioritized over gathering further repetitions of
+  the same already-confirmed finding.
+
+**Step 4 implementation notes (real-PostgreSQL concurrency verification):**
+- A remediation for the race reproduced above -- an organization-scoped PostgreSQL transaction
+  advisory lock, `pg_advisory_xact_lock(hashtextextended(organizationId, 0))`, shared by both
+  production first-row write paths (the Stripe webhook sync and `ensureStripeCustomer()`) -- was
+  implemented in `apps/api/src/services/organization-lock.ts` and wired into
+  `stripe-subscription-sync.service.ts`/`organization-subscription.service.ts`.
+- Because every existing `stripe-subscription-sync.service.test.ts`/
+  `organization-subscription.service.test.ts` suite runs against in-memory repositories with a
+  no-real-transaction runner (by design -- see those files' own doc comments), none of them can
+  prove real PostgreSQL transaction/advisory-lock behavior -- distinct from, and not a substitute
+  for, the Artillery load-test results documented above. A dedicated real-PostgreSQL
+  integration-test suite was added specifically to close that gap, kept deliberately separate
+  from the fast unit-test suite:
+  - New file `apps/api/tests/integration/organization-subscription-lock.integration.spec.ts`,
+    run via a new, separate `apps/api/vitest.integration.config.ts` and a new `test:integration`
+    npm script (root and `apps/api`) -- never part of the default `npm test`.
+  - CI (`.github/workflows/ci.yml`) gained a disposable `postgres:17.11-alpine` service
+    (matching the project's existing pinned dev-database version) in the `node` job only, with a
+    `pg_isready`-based health check, a job-scoped `DATABASE_URL` pointing at a dedicated
+    `ai_receptionist_ci_test` database, a step applying the existing Drizzle migrations
+    (`npm run db:migrate -w apps/api`, no new migration created), and a step running
+    `npm run test:integration` -- placed after the existing `npm run test` step and before
+    `npm run build`, with the `voice-agent` and `secrets` jobs left untouched.
+  - The suite uses the production lock function itself (`acquireOrganizationLock()`, unmodified)
+    as its own deterministic concurrency barrier -- one test transaction manually holds the
+    organization lock open while two real concurrent production calls are launched, confirms
+    both are genuinely still blocked (proving the lock is real, not a no-op), then releases the
+    hold and asserts the final database state. No sleep/timing-based race attempt is used.
+  - Locally verified against the existing isolated M14 scratch PostgreSQL database
+    (`m14-scratch-postgres`, port 5434, already migrated): `npm run db:migrate -w apps/api`
+    completed successfully (schema already current, no-op); `npm run test:integration` passed
+    4/4: (1) webhook vs. webhook -- two concurrent first-ever deliveries for the same
+    organization produced exactly one `organization_subscriptions` row; (2) checkout/customer
+    vs. checkout/customer -- two concurrent `ensureStripeCustomer()` calls produced exactly one
+    row and the same Stripe customer id; (3) webhook vs. checkout/customer -- cross-path
+    concurrency produced one consistent row with no cross-tenant leakage; (4) a direct sanity
+    check confirming a second concurrent lock acquirer is genuinely blocked until the first
+    releases.
+  - These four tests prove the fix closes the specific race reproduced above, under the exact
+    concurrency pattern each test constructs -- they are not a claim that every possible
+    concurrency interleaving or load level has been verified.
+  - No production locking code was changed by this verification work. No files were modified by
+    running the migration/test commands themselves. Nothing has been staged, committed, or
+    pushed.
+
+**Step 5: Final verification**
+- [ ] CI green with the new dependency-scanning and secret-scanning steps included -- the only
+      remote evidence on record (GitHub Actions run `36578099571`) confirmed the three scanning
+      mechanisms themselves but reported the overall workflow red for an unrelated, then-uncommitted
+      typecheck issue; nothing has been pushed since the M14 Step 3/4 implementation changes, so
+      there is no current end-to-end remote CI-green result to point to. Local evidence (822/822
+      tests, 0 typecheck errors) is not a substitute for this item.
+- [x] Cross-milestone tenant-isolation audit (Step 2) complete and documented, with any found gaps
+      closed.
+- [x] Rate limiting in place on the endpoints identified in Step 3, with passing tests.
+- [x] Load test executed and results documented.
+- [x] Documentation pass: `TASKS.md` completion status, `ARCHITECTURE.md`/`SECURITY.md` updates
+      reflecting whichever approach was actually chosen and implemented for Steps 1, 3, and 4 --
+      `SECURITY.md` §14's stale "advisory lock deferred" language was corrected to describe the
+      implemented fix, §7's three resolved rate-limiting/CI-scanning gaps were struck through per
+      the file's existing convention, and a new §16 documents the implemented rate limits and CI
+      scanning mechanisms; `ARCHITECTURE.md` gained a new §18 documenting the rate-limiter,
+      Stripe ordering, advisory-lock mechanism, and Artillery load-test setup.
+
 ## Future milestones
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M14 through M15.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for M15.
