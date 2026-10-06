@@ -25,6 +25,9 @@ wrapping the real ApiClient.close, not by asserting a helper method exists.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from typing import Any
 
 import httpx
@@ -133,15 +136,28 @@ class _RecordingWorker:
 
 
 class _RecordingRunner:
-    """Stand-in for WorkerRunner — completes immediately."""
+    """Stand-in for WorkerRunner — completes immediately, optionally
+    invoking a test-supplied `state["trigger"]` callback against the
+    constructed worker first. This is required to exercise session.py's
+    `finally: await _record_call_once()` finalizer: that finalizer runs
+    synchronously inside run_session() right after run() returns, before
+    a test regains control, so a terminal handler must be invoked from
+    inside run() itself to be observed by it. Existing tests never set
+    `state["trigger"]`, so this is a no-op for them -- byte-identical to
+    the previous unconditional `return None`.
+    """
 
-    def __init__(self) -> None:
+    def __init__(self, state: dict[str, Any]) -> None:
         self.workers: list[Any] = []
+        self._state = state
 
     async def add_workers(self, *workers: Any) -> None:
         self.workers.extend(workers)
 
     async def run(self, *args: Any, **kwargs: Any) -> None:
+        trigger = self._state.get("trigger")
+        if trigger is not None:
+            await trigger(self._state["worker"])
         return None
 
 
@@ -157,7 +173,9 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return worker
 
     monkeypatch.setattr(session_module, "PipelineWorker", _fake_worker)
-    monkeypatch.setattr(session_module, "WorkerRunner", _RecordingRunner)
+    monkeypatch.setattr(
+        session_module, "WorkerRunner", lambda: _RecordingRunner(state)
+    )
     return state
 
 
@@ -484,3 +502,565 @@ async def test_normal_session_never_logs_service_tokens_or_the_internal_service_
     logged_text = " ".join(r.message for r in caplog.records)
     assert secret_org_token not in logged_text
     assert secret_internal_key not in logged_text
+
+
+def _mock_record_call_route(
+    mock: respx.MockRouter, *, seen_body: dict[str, object], status: int = 201
+) -> respx.Route:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(status, json={"call": {"id": "call-1"}})
+
+    return mock.post(f"/internal/v1/organizations/{ORG_ID}/calls").mock(side_effect=handler)
+
+
+@pytest.mark.asyncio
+async def test_normal_completion_records_call_once_with_completed_disposition_and_null_summary(
+    recorded: dict[str, Any],
+) -> None:
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-normal",
+        )
+
+    assert record_route.call_count == 1
+    assert seen_body["callSid"] == "CA-normal"
+    assert seen_body["disposition"] == "completed"
+    # M12 Step 6: summary generation is genuinely wired in (see
+    # test_successful_summary_generation_is_passed_to_record_call below),
+    # but this fixture's `recorded` PipelineWorker/WorkerRunner never push
+    # any real frames through the pipeline, so the LLMContext built by
+    # build_pipeline() never gains a user/assistant turn -- only the
+    # initial system message. generate_call_summary() treats that as an
+    # empty conversation and returns None without calling the LLM, which
+    # is why summary is None here, not because it is hardcoded off.
+    assert seen_body["summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_records_call_once_with_abandoned_disposition(
+    recorded: dict[str, Any],
+) -> None:
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_idle_timeout"](worker)
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-idle-timeout",
+        )
+
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "abandoned"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_error_records_call_once_with_failed_disposition(
+    recorded: dict[str, Any],
+) -> None:
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        error_frame = ErrorFrame(error="boom", exception=RuntimeError("boom"))
+        await worker.handlers["on_pipeline_error"](worker, error_frame)
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-pipeline-error",
+        )
+
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_records_call_once_with_completed_disposition(
+    recorded: dict[str, Any],
+) -> None:
+    seen_body: dict[str, object] = {}
+    transport = _FakeTransport()
+
+    async def trigger(worker: Any) -> None:
+        disconnect_handler = transport._event_handlers["on_client_disconnected"].handlers[0]
+        await disconnect_handler(transport, None)
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=transport,
+            settings=_settings(),
+            call_sid="CA-disconnect",
+        )
+
+    assert record_route.call_count == 1
+    # Per the current, deliberate product decision: the present Twilio
+    # wiring cannot distinguish a normal hangup from an abnormal disconnect
+    # (both route through this same handler), so this is "completed", not
+    # "abandoned" -- see the approved M12 Step 6 disposition contract.
+    assert seen_body["disposition"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_failure_still_records_call_with_failed_disposition(
+    recorded: dict[str, Any], close_tracking: list[int]
+) -> None:
+    seen_body: dict[str, object] = {}
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(404, json={"error": "Organization not found."})
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-runtime-context-failure",
+        )
+
+    # Existing behavior preserved: no worker/pipeline was ever built.
+    assert "worker" not in recorded
+    assert close_tracking == [1]
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_provider_configuration_failure_still_records_call_with_failed_disposition(
+    recorded: dict[str, Any], close_tracking: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    seen_body: dict[str, object] = {}
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(stt_provider="deepgram"),
+            call_sid="CA-provider-config-failure",
+        )
+
+    assert "worker" not in recorded
+    assert close_tracking == [1]
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_api_client_construction_failure_never_attempts_call_recording(
+    recorded: dict[str, Any], close_tracking: list[int]
+) -> None:
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token="",
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-construction-failure",
+        )
+        assert len(mock.calls) == 0
+
+    assert "worker" not in recorded
+    assert close_tracking == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_error_then_finished_records_call_exactly_once_preserving_failed_disposition(
+    recorded: dict[str, Any],
+) -> None:
+    """Simulates the real double-fire sequence possible under
+    ProcessorUnusablePolicy.END (an unusable processor triggers
+    on_pipeline_error directly, then separately drives an EndFrame that
+    later fires on_pipeline_finished) -- proves the finalizer only ever
+    records once, and on_pipeline_finished's own disposition assignment is
+    skipped because it is no longer None."""
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        error_frame = ErrorFrame(error="boom", exception=RuntimeError("boom"))
+        await worker.handlers["on_pipeline_error"](worker, error_frame)
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-double-fire",
+        )
+
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_record_call_failure_does_not_crash_session_or_prevent_cleanup(
+    recorded: dict[str, Any], close_tracking: list[int]
+) -> None:
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        mock.post(f"/internal/v1/organizations/{ORG_ID}/calls").mock(
+            return_value=httpx.Response(500, json={"error": "Internal server error."})
+        )
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-recording-failure",
+        )
+
+    # No exception propagated out of run_session() above (pytest would have
+    # failed this test loudly otherwise), and cleanup still ran exactly once.
+    assert close_tracking == [1]
+
+
+@pytest.mark.asyncio
+async def test_record_call_uses_wall_clock_utc_timestamps_not_monotonic_values(
+    recorded: dict[str, Any],
+) -> None:
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-timestamps",
+        )
+
+    started_at = seen_body["startedAt"]
+    ended_at = seen_body["endedAt"]
+    assert isinstance(started_at, str) and isinstance(ended_at, str)
+    # Strict UTC ISO-8601, millisecond precision, literal 'Z' -- never the
+    # tiny/near-zero-looking values a time.monotonic() clock would produce.
+    iso_z_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+    assert iso_z_pattern.match(started_at)
+    assert iso_z_pattern.match(ended_at)
+    assert started_at <= ended_at
+
+
+@pytest.mark.asyncio
+async def test_call_recording_sends_explicit_null_summary_for_an_empty_conversation(
+    recorded: dict[str, Any],
+) -> None:
+    """M12 Step 6: the `recorded` fixture's fake PipelineWorker/WorkerRunner
+    never push real frames through the pipeline, so this session's
+    LLMContext never gains a user/assistant turn -- generate_call_summary()
+    treats that as an empty conversation and returns None without calling
+    the LLM (see test_summary.py for that behavior in isolation). This is
+    not a hardcoded null; see test_successful_summary_generation_is_passed_to_record_call
+    below for the case where generate_call_summary() returns real content."""
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_idle_timeout"](worker)
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-summary-boundary",
+        )
+
+    assert "summary" in seen_body
+    assert seen_body["summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_successful_summary_generation_is_passed_to_record_call(
+    recorded: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """session.py's wiring itself, not generate_call_summary()'s internal
+    filtering/failure logic (see test_summary.py for that) -- so
+    generate_call_summary is monkeypatched directly rather than trying to
+    drive real conversation content through the fake pipeline."""
+
+    async def fake_generate_call_summary(llm: Any, llm_context: Any) -> str | None:
+        return "Caller asked about business hours."
+
+    monkeypatch.setattr(session_module, "generate_call_summary", fake_generate_call_summary)
+
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-summary-success",
+        )
+
+    assert seen_body["summary"] == "Caller asked about business hours."
+
+
+@pytest.mark.asyncio
+async def test_explicit_none_summary_result_is_recorded_as_null(
+    recorded: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_generate_call_summary(llm: Any, llm_context: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(session_module, "generate_call_summary", fake_generate_call_summary)
+
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-summary-none",
+        )
+
+    assert "summary" in seen_body
+    assert seen_body["summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_exception_does_not_prevent_recording_or_change_disposition(
+    recorded: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_generate_call_summary(llm: Any, llm_context: Any) -> str | None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(session_module, "generate_call_summary", fake_generate_call_summary)
+
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-summary-exception",
+        )
+
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "completed"
+    assert seen_body["summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_happens_before_record_call_is_sent(
+    recorded: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+
+    async def fake_generate_call_summary(llm: Any, llm_context: Any) -> str | None:
+        order.append("summary")
+        return "Caller asked about business hours."
+
+    monkeypatch.setattr(session_module, "generate_call_summary", fake_generate_call_summary)
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        order.append("record_call")
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        mock.post(f"/internal/v1/organizations/{ORG_ID}/calls").mock(side_effect=handler)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            call_sid="CA-summary-order",
+        )
+
+    assert order == ["summary", "record_call"]
+
+
+@pytest.mark.asyncio
+async def test_call_sid_none_skips_summary_generation_and_recording(
+    recorded: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    async def fake_generate_call_summary(llm: Any, llm_context: Any) -> str | None:
+        calls.append("called")
+        return "should never be used"
+
+    monkeypatch.setattr(session_module, "generate_call_summary", fake_generate_call_summary)
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL, assert_all_called=False) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = mock.post(f"/internal/v1/organizations/{ORG_ID}/calls").mock(
+            return_value=httpx.Response(201, json={"call": {"id": "call-1"}})
+        )
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(),
+            # call_sid intentionally omitted -- defaults to None (WebRTC
+            # dev-harness path).
+        )
+
+    assert calls == []
+    assert record_route.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_timeout_still_records_call_with_null_summary(
+    recorded: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uses a real (monkeypatched) coroutine that outlasts a very small
+    configured timeout -- proves the actual asyncio.wait_for() runtime
+    behavior wired into session.py, not just generate_call_summary()'s own
+    internal error handling (already covered by test_summary.py)."""
+
+    async def hanging_generate_call_summary(llm: Any, llm_context: Any) -> str | None:
+        await asyncio.sleep(10)
+        return "should never be reached"
+
+    monkeypatch.setattr(session_module, "generate_call_summary", hanging_generate_call_summary)
+
+    seen_body: dict[str, object] = {}
+
+    async def trigger(worker: Any) -> None:
+        await worker.handlers["on_pipeline_finished"](worker, object())
+
+    recorded["trigger"] = trigger
+
+    with respx.mock(base_url=API_BASE_URL) as mock:
+        mock.get(f"/internal/v1/organizations/{ORG_ID}/runtime-context").mock(
+            return_value=httpx.Response(200, json=RUNTIME_CONTEXT_JSON)
+        )
+        record_route = _mock_record_call_route(mock, seen_body=seen_body)
+        await session_module.run_session(
+            organization_id=ORG_ID,
+            organization_service_token=ORG_TOKEN,
+            transport=_FakeTransport(),
+            settings=_settings(summary_timeout_secs=0.01),
+            call_sid="CA-summary-timeout",
+        )
+
+    assert record_route.call_count == 1
+    assert seen_body["disposition"] == "completed"
+    assert seen_body["summary"] is None

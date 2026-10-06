@@ -61,7 +61,7 @@ async def test_build_pipeline_is_transport_agnostic_and_returns_a_pipeline() -> 
         ORG_TOKEN,
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
     ) as api_client:
-        pipeline = build_pipeline(
+        pipeline, _ = build_pipeline(
             transport=_FakeTransport(),
             stt=FakeSTTService(),
             llm=FakeLLMService(),
@@ -84,7 +84,7 @@ async def test_build_pipeline_includes_a_vad_stage() -> None:
         ORG_TOKEN,
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
     ) as api_client:
-        pipeline = build_pipeline(
+        pipeline, _ = build_pipeline(
             transport=_FakeTransport(),
             stt=FakeSTTService(),
             llm=FakeLLMService(),
@@ -111,7 +111,7 @@ async def test_build_pipeline_registers_all_four_tools() -> None:
         ORG_TOKEN,
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
     ) as api_client:
-        pipeline = build_pipeline(
+        pipeline, _ = build_pipeline(
             transport=_FakeTransport(),
             stt=FakeSTTService(),
             llm=FakeLLMService(),
@@ -130,3 +130,29 @@ async def test_build_pipeline_registers_all_four_tools() -> None:
             "check_availability",
             "book_appointment",
         }
+
+
+@pytest.mark.asyncio
+async def test_build_pipeline_returns_the_same_context_the_aggregator_uses() -> None:
+    """M12 Step 6: session.py needs the exact LLMContext instance driving the
+    pipeline's context aggregator (not a copy) to later read conversation
+    history for summary generation -- see run_inference() on LLMService."""
+    async with ApiClient(
+        "http://internal-api.test",
+        "test-key",
+        ORG_TOKEN,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    ) as api_client:
+        pipeline, llm_context = build_pipeline(
+            transport=_FakeTransport(),
+            stt=FakeSTTService(),
+            llm=FakeLLMService(),
+            tts=FakeTTSService(),
+            runtime_context=_fake_runtime_context(),
+            api_client=api_client,
+        )
+
+        context_aggregators = [p for p in pipeline.processors if hasattr(p, "context")]
+        assert context_aggregators, "no context aggregator found among pipeline.processors"
+
+        assert llm_context is context_aggregators[0].context

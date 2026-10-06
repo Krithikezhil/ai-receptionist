@@ -558,12 +558,19 @@ export type NewSmsOptOutRow = typeof smsOptOuts.$inferInsert;
 
 /**
  * M12 Step 5: minimal, organization-scoped call/session metadata only --
- * no transcript, recording, or conversation content. callSid is the real
- * Twilio CallSid from M7 (routes/twilio.py), never invented. Uniqueness
- * is organization-scoped, not global -- callSid must not become a
+ * no transcript or recording content. callSid is the real Twilio CallSid
+ * from M7 (routes/twilio.py), never invented. Uniqueness is
+ * organization-scoped, not global -- callSid must not become a
  * cross-tenant lookup mechanism. disposition describes how the session
  * itself ended, not a business outcome. One row is written once, at call
  * end (see session.py) -- no separate start/update path in this step.
+ *
+ * M12 Step 6: adds a nullable, AI-generated `summary` column -- a short,
+ * business-useful recap of the completed call, distinct from a transcript
+ * or recording (still neither exists nor is planned here). Populated
+ * best-effort at the same single call-end write; NULL when generation was
+ * skipped or failed. See validation/call.schemas.ts and
+ * repositories/call-types.ts for the same note.
  */
 export const calls = pgTable(
   "calls",
@@ -578,6 +585,7 @@ export const calls = pgTable(
     disposition: text("disposition", {
       enum: ["completed", "failed", "abandoned"],
     }).notNull(),
+    summary: text("summary"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

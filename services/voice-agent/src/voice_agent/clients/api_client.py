@@ -15,8 +15,10 @@ SECURITY.md "Failure handling".
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -29,6 +31,21 @@ from voice_agent.clients.models import (
     PhoneNumberLookup,
     RuntimeContext,
 )
+
+
+def _utc_iso8601_millis(value: datetime) -> str:
+    """Formats a timezone-aware datetime as strict UTC ISO-8601 with a
+    literal 'Z' suffix and millisecond precision -- required by apps/api's
+    recordCallSchema (z.iso.datetime() with no `offset: true` configured),
+    which rejects a '+00:00' suffix. Never fabricates a timezone for a
+    naive datetime -- callers must pass one that is already aware.
+    """
+    if value.tzinfo is None:
+        raise ValueError(
+            "record_call() requires a timezone-aware datetime; got a naive one. "
+            "Pass a datetime with tzinfo set (e.g. datetime.now(timezone.utc))."
+        )
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class ApiClientError(Exception):
@@ -165,6 +182,36 @@ class ApiClient:
 
         await self._post(f"/internal/v1/organizations/{organization_id}/leads", body)
 
+    async def record_call(
+        self,
+        organization_id: str,
+        *,
+        call_sid: str,
+        started_at: datetime,
+        ended_at: datetime,
+        disposition: Literal["completed", "failed", "abandoned"],
+        summary: str | None = None,
+    ) -> None:
+        """POST /internal/v1/organizations/:id/calls (M12 Step 5/6) -- the
+        sole write path for call metadata, written once at call end. See
+        apps/api/src/controllers/internal.controller.ts's recordCall and
+        call.schemas.ts's recordCallSchema for the exact server-side
+        contract this mirrors.
+
+        summary is always sent, including as JSON null when None -- unlike
+        create_lead's optional fields above, None is itself a valid,
+        meaningful value here (summary generation was skipped or failed),
+        not merely "not provided", so there is no omit-when-falsy branch.
+        """
+        body: dict[str, str | None] = {
+            "callSid": call_sid,
+            "startedAt": _utc_iso8601_millis(started_at),
+            "endedAt": _utc_iso8601_millis(ended_at),
+            "disposition": disposition,
+            "summary": summary,
+        }
+        await self._post(f"/internal/v1/organizations/{organization_id}/calls", body)
+
     async def check_availability(
         self,
         organization_id: str,
@@ -267,7 +314,7 @@ class ApiClient:
     async def _post(
         self,
         path: str,
-        json_body: dict[str, str],
+        json_body: Mapping[str, str | None],
         *,
         ok_statuses: frozenset[int] = frozenset(),
     ) -> dict[str, Any]:

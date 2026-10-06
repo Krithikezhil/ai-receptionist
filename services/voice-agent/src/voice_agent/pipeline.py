@@ -42,7 +42,7 @@ def build_pipeline(
     runtime_context: RuntimeContext,
     api_client: ApiClient,
     call_sid: str | None = None,
-) -> Pipeline:
+) -> tuple[Pipeline, LLMContext]:
     """Builds one call/session's pipeline.
 
     Called once per connection with that session's already-fetched
@@ -80,7 +80,7 @@ def build_pipeline(
     )
     context_aggregator = LLMContextAggregatorPair(context)
 
-    return Pipeline(
+    pipeline = Pipeline(
         [
             transport.input(),
             # Real-time turn-taking/interruption detection. A local ONNX
@@ -96,3 +96,4 @@ def build_pipeline(
             context_aggregator.assistant(),
         ]
     )
+    return pipeline, context

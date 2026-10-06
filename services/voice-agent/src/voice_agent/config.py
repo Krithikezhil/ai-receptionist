@@ -24,6 +24,11 @@ _DEFAULT_OPENAI_MODEL = "gpt-4.1"
 # session.py.
 _DEFAULT_IDLE_TIMEOUT_SECS = 45.0
 
+# M12 Step 6: cap on how long best-effort call-summary generation may run
+# before the finalizer gives up and records the call with summary=None --
+# see session.py / summary.py.
+_DEFAULT_SUMMARY_TIMEOUT_SECS = 10.0
+
 
 class ConfigurationError(Exception):
     """A required environment variable is missing or malformed at startup —
@@ -92,6 +97,11 @@ class Settings:
     # the same reasons (feature-optional, and every existing Settings(...)
     # call site must keep working unchanged).
     twilio_call_credential_secret: str | None = None
+    # M12 Step 6: best-effort call-summary generation timeout (see
+    # session.py's call-recording finalizer). A default is required (not
+    # just optional typing) for the same reason as the Twilio fields above:
+    # every existing Settings(...) call site must keep working unchanged.
+    summary_timeout_secs: float = 10.0
 
 
 def _parse_idle_timeout_secs() -> float:
@@ -108,6 +118,24 @@ def _parse_idle_timeout_secs() -> float:
     if value <= 0:
         raise ConfigurationError(
             f"VOICE_AGENT_IDLE_TIMEOUT_SECS={raw!r} must be a positive number of seconds."
+        )
+    return value
+
+
+def _parse_summary_timeout_secs() -> float:
+    raw = os.environ.get("VOICE_AGENT_SUMMARY_TIMEOUT_SECS")
+    if raw is None or raw == "":
+        return _DEFAULT_SUMMARY_TIMEOUT_SECS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"VOICE_AGENT_SUMMARY_TIMEOUT_SECS={raw!r} is not a number. "
+            "Set it to a positive number of seconds, e.g. 10."
+        ) from exc
+    if value <= 0:
+        raise ConfigurationError(
+            f"VOICE_AGENT_SUMMARY_TIMEOUT_SECS={raw!r} must be a positive number of seconds."
         )
     return value
 
@@ -132,4 +160,5 @@ def get_settings() -> Settings:
         twilio_auth_token=os.environ.get("TWILIO_AUTH_TOKEN"),
         voice_agent_public_base_url=os.environ.get("VOICE_AGENT_PUBLIC_BASE_URL"),
         twilio_call_credential_secret=os.environ.get("TWILIO_CALL_CREDENTIAL_SECRET"),
+        summary_timeout_secs=_parse_summary_timeout_secs(),
     )

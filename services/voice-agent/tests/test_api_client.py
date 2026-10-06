@@ -5,6 +5,7 @@ no real network, no real apps/api instance needed.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -183,6 +184,178 @@ async def test_create_lead_unreachable_server_raises_api_unreachable_error() -> 
     ) as client:
         with pytest.raises(ApiUnreachableError):
             await client.create_lead(ORG_ID, contact_name="Jane Caller")
+
+
+@pytest.mark.asyncio
+async def test_record_call_sends_expected_path_and_all_five_fields() -> None:
+    seen_body: dict[str, object] = {}
+    seen_path = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_path
+        seen_path = request.url.path
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.record_call(
+            ORG_ID,
+            call_sid="CA-test-1",
+            started_at=datetime(2026, 1, 2, 3, 4, 5, 123000, tzinfo=UTC),
+            ended_at=datetime(2026, 1, 2, 3, 5, 5, 123000, tzinfo=UTC),
+            disposition="completed",
+            summary="Caller asked about hours.",
+        )
+
+    assert seen_path == f"/internal/v1/organizations/{ORG_ID}/calls"
+    assert seen_body == {
+        "callSid": "CA-test-1",
+        "startedAt": "2026-01-02T03:04:05.123Z",
+        "endedAt": "2026-01-02T03:05:05.123Z",
+        "disposition": "completed",
+        "summary": "Caller asked about hours.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_record_call_sends_explicit_null_when_summary_is_none() -> None:
+    seen_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.record_call(
+            ORG_ID,
+            call_sid="CA-test-2",
+            started_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+            ended_at=datetime(2026, 1, 2, 3, 5, 5, tzinfo=UTC),
+            disposition="completed",
+            summary=None,
+        )
+
+    # Distinct from a merely-absent key: dict.get("summary") would also be
+    # None if the key were omitted, so the membership check is what actually
+    # proves the field was sent as JSON null rather than left out entirely.
+    assert "summary" in seen_body
+    assert seen_body["summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_record_call_formats_utc_datetime_with_millisecond_precision_and_z_suffix() -> None:
+    seen_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.record_call(
+            ORG_ID,
+            call_sid="CA-test-3",
+            started_at=datetime(2026, 1, 2, 3, 4, 5, 123000, tzinfo=UTC),
+            ended_at=datetime(2026, 1, 2, 3, 4, 5, 123000, tzinfo=UTC),
+            disposition="completed",
+        )
+
+    assert seen_body["startedAt"] == "2026-01-02T03:04:05.123Z"
+    assert seen_body["endedAt"] == "2026-01-02T03:04:05.123Z"
+
+
+@pytest.mark.asyncio
+async def test_record_call_converts_non_utc_offset_to_utc() -> None:
+    seen_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.record_call(
+            ORG_ID,
+            call_sid="CA-test-4",
+            # 2026-01-02T03:04:05.123 at -05:00 is 2026-01-02T08:04:05.123Z.
+            started_at=datetime(2026, 1, 2, 3, 4, 5, 123000, tzinfo=timezone(timedelta(hours=-5))),
+            ended_at=datetime(2026, 1, 2, 3, 4, 5, 123000, tzinfo=timezone(timedelta(hours=-5))),
+            disposition="completed",
+        )
+
+    assert seen_body["startedAt"] == "2026-01-02T08:04:05.123Z"
+    assert seen_body["endedAt"] == "2026-01-02T08:04:05.123Z"
+
+
+@pytest.mark.asyncio
+async def test_record_call_naive_datetime_raises_value_error_without_sending_a_request() -> None:
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ValueError):
+            await client.record_call(
+                ORG_ID,
+                call_sid="CA-test-5",
+                started_at=datetime(2026, 1, 2, 3, 4, 5),  # naive -- no tzinfo
+                ended_at=datetime(2026, 1, 2, 3, 5, 5, tzinfo=UTC),
+                disposition="completed",
+            )
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["completed", "failed", "abandoned"])
+async def test_record_call_accepts_all_three_dispositions(disposition: str) -> None:
+    seen_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content))
+        return httpx.Response(201, json={"call": {"id": "call-1"}})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.record_call(
+            ORG_ID,
+            call_sid="CA-disposition-test",
+            started_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+            ended_at=datetime(2026, 1, 2, 3, 5, 5, tzinfo=UTC),
+            disposition=disposition,  # type: ignore[arg-type]
+        )
+
+    assert seen_body["disposition"] == disposition
+
+
+@pytest.mark.asyncio
+async def test_record_call_403_raises_api_forbidden_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "Not authorized for this organization."})
+
+    async with ApiClient(
+        "http://internal-api.test", "test-key", ORG_TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(ApiForbiddenError):
+            await client.record_call(
+                ORG_ID,
+                call_sid="CA-test-7",
+                started_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+                ended_at=datetime(2026, 1, 2, 3, 5, 5, tzinfo=UTC),
+                disposition="completed",
+            )
 
 
 @pytest.mark.asyncio

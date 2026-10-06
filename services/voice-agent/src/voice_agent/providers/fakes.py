@@ -80,11 +80,19 @@ class FakeLLMService(LLMService):
         *,
         tool_trigger: str = "knowledge",
         canned_response: str = "This is a fake receptionist response.",
+        inference_result: str | None = "Fake call summary.",
+        inference_error: Exception | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._tool_trigger = tool_trigger.lower()
         self._canned_response = canned_response
+        self._inference_result = inference_result
+        self._inference_error = inference_error
+        # M12 Step 6: last LLMContext seen by run_inference(), for tests to
+        # assert on what summary.py actually sent -- not used by production
+        # code.
+        self.last_context: LLMContext | None = None
 
     def _last_user_text(self, context: LLMContext) -> str:
         for message in reversed(context.get_messages()):
@@ -112,6 +120,17 @@ class FakeLLMService(LLMService):
                 await self.push_frame(LLMFullResponseEndFrame())
         else:
             await self.push_frame(frame, direction)
+
+    async def run_inference(
+        self,
+        context: LLMContext,
+        max_tokens: int | None = None,
+        system_instruction: str | None = None,
+    ) -> str | None:
+        self.last_context = context
+        if self._inference_error is not None:
+            raise self._inference_error
+        return self._inference_result
 
     async def _process_context(self, context: LLMContext) -> None:
         last_user_text = self._last_user_text(context)
